@@ -60,7 +60,7 @@ const u16 gfx_palette[16] =
     0x0040,     // C - dark green
     0x00E0,     // D - green
 
-    0x0044,     // D - dark yellow
+    0x0044,     // E - dark yellow
     0x00EE      // F - yellow
 };
 
@@ -112,8 +112,8 @@ static void hint();
 // get access to XGM driver timer
 extern s16 xgmTempoCnt;
 
-// store it in variable for single value
-u16 numMusic;
+// make it in a volatile variable so compiler won't optimize to constant in code
+vu16 numMusic = 1;
 
 // track infos cache
 static XD3 trackInfos[MAX_MUSIC];
@@ -150,10 +150,9 @@ static u16 dmawaitload;
 
 // left / right sprites
 static Sprite* YMPanSprites[6];
-static Sprite* progressBar;
 static Sprite* trackListCursor;
-static Sprite* trackListShadowTop;
-static Sprite* trackListShadowBottom;
+static Sprite* trackListShadowTop[3];
+static Sprite* trackListShadowBottom[3];
 
 // BG starfield scrolling
 static s16 scrollB[SCROLLV_LEN];
@@ -167,7 +166,9 @@ static u16 buttonsPressed;
 static u16 pressTime;
 static u16 tileIndex;
 static u16 tileIndexProgressBar;
-static u16 tileIndexShadowMask;
+static u16 tileIndexShadowMaskOdd;
+static u16 tileIndexShadowMaskEven;
+static u16 curTileIndexMesh;
 static s16 trackListScrollPos;
 static u16 playStateCnt;
 static u16 evenCnt;
@@ -175,7 +176,7 @@ static u16 playIdleCnt;
 static u16 fastForward;
 static u16 progressBarLevel;
 static u16 needProgressUpload;
-static Map* bgMap;
+static TileMap* bgTileMap;
 
 // tiles buffer for chips state rendering
 static u8 progressTileBuffer[32*15];
@@ -192,6 +193,7 @@ int main()
     u16 i;
 
     SYS_disableInts();
+    SYS_setVIntAligned(FALSE);
 
     // clear all palette
     VDP_setPaletteColors(0, palette_black, 64);
@@ -208,18 +210,18 @@ int main()
     VDP_setHIntCounter(128);
 
     // setup VRAM
-    VDP_setPlanSize(64, 64);
+    VDP_setPlaneSize(64, 64, FALSE);
     VDP_setSpriteListAddress(0xA800);
     VDP_setHScrollTableAddress(0xAC00);
     VDP_setWindowAddress(0xB000);
-    VDP_setBPlanAddress(0xC000);
-    VDP_setAPlanAddress(0xE000);
+    VDP_setBGBAddress(0xC000);
+    VDP_setBGAAddress(0xE000);
 
-    // set window visible from first ro up to row 13
+    // set window visible from first row up to row 13
     VDP_setWindowHPos(FALSE, 0);
     VDP_setWindowVPos(FALSE, 13);
     // by default we draw text in window plan and in high priority
-    VDP_setTextPlan(PLAN_WINDOW);
+    VDP_setTextPlane(WINDOW);
     VDP_setTextPriority(TRUE);
 
     // clear HScroll table
@@ -232,9 +234,6 @@ int main()
     memset(trackInfos, 0, sizeof(trackInfos));
     // init plan track cache
     memset(planTrackIndexesCache, 0xFF, sizeof(planTrackIndexesCache));
-
-    // init it for once
-    numMusic = NUM_MUSIC;
 
     trackPlayedRawIndex = -1;
     trackPlayed = -1;
@@ -271,8 +270,10 @@ int main()
     XGM_setForceDelayDMA(TRUE);
 
     // init some GFX var
-    tileIndex = TILE_USERINDEX + bg.tileset->numTile + music_logo.tileset->numTile + starfield.tileset->numTile;
-    bgMap = unpackMap(bg.map, NULL);
+    tileIndexProgressBar = TILE_USERINDEX + bg.tileset->numTile + music_logo.tileset->numTile;
+    tileIndex = TILE_USERINDEX + bg.tileset->numTile + music_logo.tileset->numTile + progress_bar.tileset->numTile + starfield.tileset->numTile;
+
+    bgTileMap = unpackTileMap(bg.tilemap, NULL);
 
     // init shuffle list
     buildShuffledList();
@@ -282,7 +283,7 @@ int main()
     initBGScroll();
 
     // init Sprite engine
-    SPR_init(20, 80, 64);
+    SPR_initEx(80);
 
     // prepare sprites for panning
     YMPanSprites[0] = SPR_addSprite(&left_right, 32 + 0, 203, TILE_ATTR(PAL0, TRUE, FALSE, FALSE));
@@ -293,17 +294,22 @@ int main()
     YMPanSprites[5] = SPR_addSprite(&left_right, 32 + 119, 203, TILE_ATTR(PAL0, TRUE, FALSE, FALSE));
     for(i = 0; i < 6; i++)
         SPR_setVisibility(YMPanSprites[i], VISIBLE);
-    // progress bar
-    progressBar = SPR_addSpriteEx(&progress_bar, 78, 64, TILE_ATTR_FULL(PAL3, TRUE, FALSE, FALSE, tileIndexProgressBar), 0, SPR_FLAG_AUTO_SPRITE_ALLOC);
-    SPR_setVisibility(progressBar, VISIBLE);
     // prepare track list cursor
     trackListCursor = SPR_addSprite(&cursor, 0, 108, TILE_ATTR(PAL0, TRUE, FALSE, FALSE));
     SPR_setVisibility(trackListCursor, VISIBLE);
     // prepare track list shadow
-    trackListShadowTop = SPR_addSpriteEx(&shadow_mask, 8, 100, TILE_ATTR_FULL(PAL3, TRUE, FALSE, FALSE, tileIndexShadowMask), 0, SPR_FLAG_AUTO_SPRITE_ALLOC);
-    trackListShadowBottom = SPR_addSpriteEx(&shadow_mask, 8, 132, TILE_ATTR_FULL(PAL3, TRUE, TRUE, FALSE, tileIndexShadowMask), 0, SPR_FLAG_AUTO_SPRITE_ALLOC);
-    SPR_setVisibility(trackListShadowTop, VISIBLE);
-    SPR_setVisibility(trackListShadowBottom, VISIBLE);
+    curTileIndexMesh = tileIndexShadowMaskOdd;
+    trackListShadowTop[0] = SPR_addSpriteEx(&shadow_mask_16, 8, 100, TILE_ATTR_FULL(PAL3, TRUE, FALSE, FALSE, curTileIndexMesh), 0, SPR_FLAG_AUTO_SPRITE_ALLOC);
+    trackListShadowTop[1] = SPR_addSpriteEx(&shadow_mask_16, 8+128, 100, TILE_ATTR_FULL(PAL3, TRUE, FALSE, FALSE, curTileIndexMesh), 0, SPR_FLAG_AUTO_SPRITE_ALLOC);
+    trackListShadowTop[2] = SPR_addSpriteEx(&shadow_mask_7, 8+256, 100, TILE_ATTR_FULL(PAL3, TRUE, FALSE, FALSE, curTileIndexMesh), 0, SPR_FLAG_AUTO_SPRITE_ALLOC);
+    trackListShadowBottom[0] = SPR_addSpriteEx(&shadow_mask_16, 8, 132, TILE_ATTR_FULL(PAL3, TRUE, TRUE, FALSE, curTileIndexMesh), 0, SPR_FLAG_AUTO_SPRITE_ALLOC);
+    trackListShadowBottom[1] = SPR_addSpriteEx(&shadow_mask_16, 8+128, 132, TILE_ATTR_FULL(PAL3, TRUE, TRUE, FALSE, curTileIndexMesh), 0, SPR_FLAG_AUTO_SPRITE_ALLOC);
+    trackListShadowBottom[2] = SPR_addSpriteEx(&shadow_mask_7, 8+256, 132, TILE_ATTR_FULL(PAL3, TRUE, TRUE, FALSE, curTileIndexMesh), 0, SPR_FLAG_AUTO_SPRITE_ALLOC);
+    for(i = 0; i < 3; i++)
+    {
+        SPR_setVisibility(trackListShadowTop[i], VISIBLE);
+        SPR_setVisibility(trackListShadowBottom[i], VISIBLE);
+    }
 
     // reset sound chip
     YM_init(&ym);
@@ -330,7 +336,7 @@ int main()
     palette[15] = 0xEEE;
     memcpy(&palette[1 * 16], gfx_palette, 16 * 2);
     memcpy(&palette[2 * 16], music_logo.palette->data, 16 * 2);
-    memcpy(&palette[3 * 16], shadow_mask.palette->data, 16 * 2);
+    memcpy(&palette[3 * 16], shadow_mask_16.palette->data, 16 * 2);
     // set hilight/shadow operators to black color
     palette[62] = 0x000;
     palette[63] = 0x000;
@@ -382,6 +388,15 @@ int main()
             // update YM envelop states
             YM_updateEnv(&ym);
             frameToUpdate--;
+        }
+
+        // alternate mesh
+        if (curTileIndexMesh == tileIndexShadowMaskEven) curTileIndexMesh = tileIndexShadowMaskOdd;
+        else curTileIndexMesh = tileIndexShadowMaskEven;
+        for(i = 0; i < 3; i++)
+        {
+            SPR_setVRAMTileIndex(trackListShadowTop[i], curTileIndexMesh);
+            SPR_setVRAMTileIndex(trackListShadowBottom[i], curTileIndexMesh);
         }
 
         SPR_update();
@@ -578,42 +593,47 @@ static void drawStaticGUI()
 
     SYS_disableInts();
 
-    VDP_drawImageEx(PLAN_WINDOW, &bg, TILE_ATTR_FULL(PAL0, TRUE, FALSE, FALSE, TILE_USERINDEX), 0, 0, FALSE, TRUE);
-    VDP_drawImageEx(PLAN_WINDOW, &music_logo, TILE_ATTR_FULL(PAL2, TRUE, FALSE, FALSE, TILE_USERINDEX + bg.tileset->numTile), 21, 0, FALSE, TRUE);
-    VDP_drawImageEx(PLAN_B, &starfield, TILE_ATTR_FULL(PAL0, FALSE, FALSE, FALSE, TILE_USERINDEX + bg.tileset->numTile + music_logo.tileset->numTile), 0, 0, FALSE, TRUE);
+    // General GUI & logo
+    VDP_drawImageEx(WINDOW, &bg, TILE_ATTR_FULL(PAL0, TRUE, FALSE, FALSE, TILE_USERINDEX), 0, 0, FALSE, TRUE);
+    VDP_drawImageEx(WINDOW, &music_logo, TILE_ATTR_FULL(PAL2, TRUE, FALSE, FALSE, TILE_USERINDEX + bg.tileset->numTile), 21, 0, FALSE, TRUE);
+    VDP_drawImageEx(WINDOW, &progress_bar, TILE_ATTR_FULL(PAL0, TRUE, FALSE, FALSE, tileIndexProgressBar), 9, 8, FALSE, TRUE);
+    // starfield
+    VDP_drawImageEx(BG_B, &starfield, TILE_ATTR_FULL(PAL0, FALSE, FALSE, FALSE, TILE_USERINDEX + bg.tileset->numTile + music_logo.tileset->numTile + progress_bar.tileset->numTile), 0, 0, FALSE, TRUE);
 
-    // prepare 'bitmap' buffer for chips state rendering
+    // prepare 'bitTileMap' buffer for chips state rendering
     i = 0;
 
     // Z80 area
     for(y = 0; y < 4; y++, i++)
-        VDP_setTileMapXY(PLAN_WINDOW, TILE_ATTR_FULL(PAL1, TRUE, FALSE, FALSE, tileIndex + i), 1, 21 + y);
+        VDP_setTileMapXY(WINDOW, TILE_ATTR_FULL(PAL1, TRUE, FALSE, FALSE, tileIndex + i), 1, 21 + y);
     // YM area
     for(x = 0; x < 6; x++)
         for(sx = 0; sx < 3; sx++)
             for(y = 0; y < 4; y++, i++)
-                VDP_setTileMapXY(PLAN_WINDOW, TILE_ATTR_FULL(PAL1, TRUE, FALSE, FALSE, tileIndex + i), 4 + (x * 3) + sx, 21 + y);
+                VDP_setTileMapXY(WINDOW, TILE_ATTR_FULL(PAL1, TRUE, FALSE, FALSE, tileIndex + i), 4 + (x * 3) + sx, 21 + y);
     // PCM area
     for(x = 0; x < 4; x++)
         for(sx = 0; sx < 3; sx++)
             for(y = 0; y < 4; y++, i++)
-                VDP_setTileMapXY(PLAN_WINDOW, TILE_ATTR_FULL(PAL1, TRUE, FALSE, FALSE, tileIndex + i), 23 + (x * 3) + sx, 21 + y);
+                VDP_setTileMapXY(WINDOW, TILE_ATTR_FULL(PAL1, TRUE, FALSE, FALSE, tileIndex + i), 23 + (x * 3) + sx, 21 + y);
     // PSG area
     for(x = 0; x < 4; x++)
         for(y = 0; y < 4; y++, i++)
-            VDP_setTileMapXY(PLAN_WINDOW, TILE_ATTR_FULL(PAL1, TRUE, FALSE, FALSE, tileIndex + i), 36 + x, 21 + y);
+            VDP_setTileMapXY(WINDOW, TILE_ATTR_FULL(PAL1, TRUE, FALSE, FALSE, tileIndex + i), 36 + x, 21 + y);
 
-    // preload tilesets for progress bar and shadow mask
-    tileIndexProgressBar = tileIndex + i;
-    tileset = unpackTileSet(progress_bar.animations[0]->frames[0]->tileset, NULL);
+    // prepare progress bar rendering buffer
+    tileset = unpackTileSet(progress_bar.tileset, NULL);
     memcpy(progressTileBuffer, tileset->tiles, tileset->numTile * 32);
-    VDP_loadTileSet(tileset, tileIndexProgressBar, TRUE);
-
-    tileIndexShadowMask = tileIndexProgressBar + tileset->numTile;;
     // release unpacked tileset
     MEM_free(tileset);
-    tileset = shadow_mask.animations[0]->frames[0]->tileset;
-    VDP_loadTileSet(tileset, tileIndexShadowMask, TRUE);
+
+    // preload tilesets for shadow mask
+    tileIndexShadowMaskOdd =  tileIndex + i;
+    tileset = shadow_mask_16.animations[0]->frames[0]->tileset;
+    VDP_loadTileSet(tileset, tileIndexShadowMaskOdd, TRUE);
+    tileIndexShadowMaskEven = tileIndexShadowMaskOdd + tileset->numTile;
+    tileset = shadow_mask_16.animations[1]->frames[0]->tileset;
+    VDP_loadTileSet(tileset, tileIndexShadowMaskEven, TRUE);
 
     SYS_enableInts();
 }
@@ -626,24 +646,24 @@ static void drawPlayerControls()
     if (buttonsPressed & BUTTON_START)
     {
         // DPad control
-        VDP_setMapEx(PLAN_WINDOW, bgMap, TILE_ATTR_FULL(PAL0, TRUE, FALSE, FALSE, TILE_USERINDEX), 0, 2, 40 + 7, 6, 7, 6);
+        VDP_setTileMapEx(WINDOW, bgTileMap, TILE_ATTR_FULL(PAL0, TRUE, FALSE, FALSE, TILE_USERINDEX), 0, 2, 40 + 7, 6, 7, 6, CPU);
 
         // not playing
         if ((trackPlayed == -1) || paused)
-            VDP_setMapEx(PLAN_WINDOW, bgMap, TILE_ATTR_FULL(PAL0, TRUE, FALSE, FALSE, TILE_USERINDEX), 7, 2, 21 + (7 * 2), 0, 7, 6);
+            VDP_setTileMapEx(WINDOW, bgTileMap, TILE_ATTR_FULL(PAL0, TRUE, FALSE, FALSE, TILE_USERINDEX), 7, 2, 21 + (7 * 2), 0, 7, 6, CPU);
         else
-            VDP_setMapEx(PLAN_WINDOW, bgMap, TILE_ATTR_FULL(PAL0, TRUE, FALSE, FALSE, TILE_USERINDEX), 7, 2, 21 + (7 * 2) + 7, 0, 7, 6);
+            VDP_setTileMapEx(WINDOW, bgTileMap, TILE_ATTR_FULL(PAL0, TRUE, FALSE, FALSE, TILE_USERINDEX), 7, 2, 21 + (7 * 2) + 7, 0, 7, 6, CPU);
     }
     else
     {
         // DPad control
-        VDP_setMapEx(PLAN_WINDOW, bgMap, TILE_ATTR_FULL(PAL0, TRUE, FALSE, FALSE, TILE_USERINDEX), 0, 2, 40, 6, 7, 6);
+        VDP_setTileMapEx(WINDOW, bgTileMap, TILE_ATTR_FULL(PAL0, TRUE, FALSE, FALSE, TILE_USERINDEX), 0, 2, 40, 6, 7, 6, CPU);
 
         // not playing
         if ((trackPlayed == -1) || paused)
-            VDP_setMapEx(PLAN_WINDOW, bgMap, TILE_ATTR_FULL(PAL0, TRUE, FALSE, FALSE, TILE_USERINDEX), 7, 2, 21, 0, 7, 6);
+            VDP_setTileMapEx(WINDOW, bgTileMap, TILE_ATTR_FULL(PAL0, TRUE, FALSE, FALSE, TILE_USERINDEX), 7, 2, 21, 0, 7, 6, CPU);
         else
-            VDP_setMapEx(PLAN_WINDOW, bgMap, TILE_ATTR_FULL(PAL0, TRUE, FALSE, FALSE, TILE_USERINDEX), 7, 2, 21 + 7, 0, 7, 6);
+            VDP_setTileMapEx(WINDOW, bgTileMap, TILE_ATTR_FULL(PAL0, TRUE, FALSE, FALSE, TILE_USERINDEX), 7, 2, 21 + 7, 0, 7, 6, CPU);
     }
 
     SYS_enableInts();
@@ -665,12 +685,12 @@ static void drawPlayerSettings()
 
     VDP_drawText(tempoStr, 17, 4);
     // refresh shuffle state
-    if (shuffle) VDP_setMapEx(PLAN_WINDOW, bgMap, TILE_ATTR_FULL(PAL0, TRUE, FALSE, FALSE, TILE_USERINDEX), 26, 8, 25, 6, 2, 1);
-    else VDP_setMapEx(PLAN_WINDOW, bgMap, TILE_ATTR_FULL(PAL0, TRUE, FALSE, FALSE, TILE_USERINDEX), 26, 8, 23, 6, 2, 1);
+    if (shuffle) VDP_setTileMapEx(WINDOW, bgTileMap, TILE_ATTR_FULL(PAL0, TRUE, FALSE, FALSE, TILE_USERINDEX), 26, 8, 25, 6, 2, 1, CPU);
+    else VDP_setTileMapEx(WINDOW, bgTileMap, TILE_ATTR_FULL(PAL0, TRUE, FALSE, FALSE, TILE_USERINDEX), 26, 8, 23, 6, 2, 1, CPU);
     // refresh loop state
     if (loop != MAX_LOOP) VDP_drawText(loopStr, 18, 6);
     // use infinite symbol from original image
-    else VDP_setMapEx(PLAN_WINDOW, bgMap, TILE_ATTR_FULL(PAL0, TRUE, FALSE, FALSE, TILE_USERINDEX), 18, 6, 21, 6, 2, 1);
+    else VDP_setTileMapEx(WINDOW, bgTileMap, TILE_ATTR_FULL(PAL0, TRUE, FALSE, FALSE, TILE_USERINDEX), 18, 6, 21, 6, 2, 1, CPU);
 
     SYS_enableInts();
 }
@@ -778,7 +798,7 @@ static void updateProgressBar(u16 level)
 
     // min level = 2, max level = 58
     u16 curLevel = progressBarLevel;
-    u8 col = 0x33;
+    u8 col = 0x99;
     u8* dst = &progressTileBuffer[12];
 
     dst += (curLevel >> 2) << 5;
@@ -887,7 +907,7 @@ static void drawPlayList()
     u16 num;
 
     // play list is draw in plan A to use scrolling capabilities
-    VDP_setTextPlan(PLAN_A);
+    VDP_setTextPlane(BG_A);
 
     planInd = trackIndexList - 3;
     trackInd = planInd % numMusic;
@@ -904,7 +924,7 @@ static void drawPlayList()
     }
 
     // restore previous value
-    VDP_setTextPlan(PLAN_WINDOW);
+    VDP_setTextPlane(WINDOW);
 }
 
 static void drawShortTrackInfo(s16 planIndex, u16 index)
@@ -1005,25 +1025,25 @@ static void drawChipsStates()
     SYS_disableInts();
     if (needProgressUpload)
     {
-        DMA_queueDma(DMA_VRAM, (u32) progressTileBuffer, tileIndexProgressBar * TILE_SIZE, sizeof(progressTileBuffer) / 2, 2);
+        DMA_queueDma(DMA_VRAM, progressTileBuffer, tileIndexProgressBar * TILE_SIZE, sizeof(progressTileBuffer) / 2, 2);
         needProgressUpload = FALSE;
     }
-    DMA_queueDma(DMA_VRAM, (u32) z80TileBuffer, (tileIndex + (0 * 4)) * TILE_SIZE, sizeof(z80TileBuffer) / 2, 2);
+    DMA_queueDma(DMA_VRAM, z80TileBuffer, (tileIndex + (0 * 4)) * TILE_SIZE, sizeof(z80TileBuffer) / 2, 2);
     // first part
     if (evenCnt & 1)
     {
-        DMA_queueDma(DMA_VRAM, (u32) ymTileBuffer, (tileIndex + (1 * 4)) * TILE_SIZE, sizeof(ymTileBuffer) / 4, 2);
-        DMA_queueDma(DMA_VRAM, (u32) pcmTileBuffer, (tileIndex + ((1 + (6 * 3)) * 4)) * TILE_SIZE, sizeof(pcmTileBuffer) / 4, 2);
-        DMA_queueDma(DMA_VRAM, (u32) psgTileBuffer, (tileIndex + ((1 + (6 * 3) + (4 * 3)) * 4)) * TILE_SIZE, sizeof(psgTileBuffer) / 4, 2);
+        DMA_queueDma(DMA_VRAM, ymTileBuffer, (tileIndex + (1 * 4)) * TILE_SIZE, sizeof(ymTileBuffer) / 4, 2);
+        DMA_queueDma(DMA_VRAM, pcmTileBuffer, (tileIndex + ((1 + (6 * 3)) * 4)) * TILE_SIZE, sizeof(pcmTileBuffer) / 4, 2);
+        DMA_queueDma(DMA_VRAM, psgTileBuffer, (tileIndex + ((1 + (6 * 3) + (4 * 3)) * 4)) * TILE_SIZE, sizeof(psgTileBuffer) / 4, 2);
     }
     // second part
     else
     {
-        DMA_queueDma(DMA_VRAM, ((u32) ymTileBuffer) + (32 * 4 * 3 * 3), (tileIndex + ((1 + (3 * 3)) * 4)) * TILE_SIZE, sizeof(ymTileBuffer) / 4, 2);
-        DMA_queueDma(DMA_VRAM, ((u32) pcmTileBuffer) + (32 * 4 * 3 * 2), (tileIndex + ((1 + (6 * 3) + (2 * 3)) * 4)) * TILE_SIZE, sizeof(pcmTileBuffer) / 4, 2);
-        DMA_queueDma(DMA_VRAM, ((u32) psgTileBuffer) + (32 * 4 * 1 * 2), (tileIndex + ((1 + (6 * 3) + (4 * 3) + (2 * 1)) * 4)) * TILE_SIZE, sizeof(psgTileBuffer) / 4, 2);
+        DMA_queueDma(DMA_VRAM, ymTileBuffer + (32 * 4 * 3 * 3), (tileIndex + ((1 + (3 * 3)) * 4)) * TILE_SIZE, sizeof(ymTileBuffer) / 4, 2);
+        DMA_queueDma(DMA_VRAM, pcmTileBuffer + (32 * 4 * 3 * 2), (tileIndex + ((1 + (6 * 3) + (2 * 3)) * 4)) * TILE_SIZE, sizeof(pcmTileBuffer) / 4, 2);
+        DMA_queueDma(DMA_VRAM, psgTileBuffer + (32 * 4 * 1 * 2), (tileIndex + ((1 + (6 * 3) + (4 * 3) + (2 * 1)) * 4)) * TILE_SIZE, sizeof(psgTileBuffer) / 4, 2);
     }
-    DMA_queueDma(DMA_VRAM, (u32) scrollB, VDP_HSCROLL_TABLE + 2, SCROLLV_LEN, 4);
+    DMA_queueDma(DMA_VRAM, scrollB, VDP_HSCROLL_TABLE + 2, SCROLLV_LEN, 4);
     SYS_enableInts();
 }
 
@@ -1073,10 +1093,18 @@ static void drawYMState()
     while(c--)
     {
         const YM_SLOT *sl = &(ch->slots[0]);
+        const u16 pan = (ch->pan >> 6) & 3;
         u16 s;
 
         // set LEFT/RIGHT panning info
-        SPR_setAnim(*panSpr++, (ch->pan >> 6) & 3);
+        if (pan)
+        {
+            SPR_setVisibility(*panSpr, VISIBLE);
+            SPR_setAnim(*panSpr, pan - 1);
+        }
+        else
+            SPR_setVisibility(*panSpr, HIDDEN);
+        panSpr++;
 
         s = 4;
         while(s--)
@@ -1446,7 +1474,7 @@ static void updateListScroll()
         trackListScrollPos += step;
 
         // set new track list scroll position
-        VDP_setVerticalScroll(PLAN_A, trackListScrollPos);
+        VDP_setVerticalScroll(BG_A, trackListScrollPos);
 
         cursorPos = trackIndexList;
         cursorPos %= numMusic;
@@ -1596,12 +1624,12 @@ static void joyEvent(u16 joy, u16 changed, u16 state)
             if (bgEnabled)
             {
                 bgEnabled = FALSE;
-                VDP_setVerticalScroll(PLAN_B, 32 * 8);
+                VDP_setVerticalScroll(BG_B, 32 * 8);
             }
             else
             {
                 bgEnabled = TRUE;
-                VDP_setVerticalScroll(PLAN_B, 0 * 8);
+                VDP_setVerticalScroll(BG_B, 0 * 8);
             }
         }
         // hide/show playlist
@@ -1713,20 +1741,20 @@ static void joyEvent(u16 joy, u16 changed, u16 state)
     // PCM 1
     if (pressed & BUTTON_X)
     {
-        XGM_setPCM(64, pcm_loop, sizeof(pcm_loop));
+        XGM_setPCM(64, pcm_hat2, sizeof(pcm_hat2));
         XGM_startPlayPCM(64, 1, SOUND_PCM_CH2);
     }
     // PCM 2
     if (pressed & BUTTON_Y)
     {
-        XGM_setPCM(65, pcm_voice, sizeof(pcm_voice));
+        XGM_setPCM(65, pcm_snare2, sizeof(pcm_snare2));
         XGM_startPlayPCM(65, 1, SOUND_PCM_CH3);
     }
     // PCM 3
     if (pressed & BUTTON_Z)
     {
-        XGM_setPCM(64, pcm_loop, sizeof(pcm_loop));
-        XGM_startPlayPCM(64, 1, SOUND_PCM_CH4);
+        XGM_setPCM(66, pcm_voice, sizeof(pcm_voice));
+        XGM_startPlayPCM(66, 1, SOUND_PCM_CH4);
     }
 }
 

@@ -640,15 +640,17 @@ static void VGM_buildSamples(VGM* vgm, bool convert)
                 int sampleId = VGMCommand_getStreamBlockId(command);
                 Sample* sample = SampleBank_getSampleById(bank, sampleId);
 
-                // sample found --> adjust frequency
+                // sample found ?
                 if (sample != NULL)
+                {
+                    // adjust frequency
                     Sample_setRate(sample, sampleIdFrequencies[VGMCommand_getStreamId(command)]);
+                    // convert to long command as we use single data block
+                    if (convert)
+                        curCom->element = Sample_getStartLongCommandEx(bank, sample, sample->len);
+                }
                 else if (!silent)
                     printf("Warning: sample id %2X not found !\n", sampleId);
-
-                // convert to long command as we use single data block
-                if (convert)
-                    curCom->element = Sample_getStartLongCommandEx(bank, sample, sample->len);
             }
             else if (!silent)
                 printf("Warning: sample bank id %2X not found !\n", bankId);
@@ -1135,7 +1137,16 @@ void VGM_cleanCommands(VGM* vgm)
 
             // keep data block, stream commands and other misc commands
             if (VGMCommand_isDataBlock(command) || VGMCommand_isStream(command) || VGMCommand_isLoopStart(command) || VGMCommand_isLoopEnd(command))
+            {
                 optimizedCommands = insertAfterLList(optimizedCommands, command);
+                // loop start ? -->
+                if (VGMCommand_isLoopStart(command))
+                {
+                    // need to reset YM and PSG previous state
+                    ymOldState = YM2612_create();
+                    psgOldState = PSG_create();
+                }
+            }
             else if (VGMCommand_isPSGWrite(command))
                 PSG_write(psgState, VGMCommand_getPSGValue(command));
             else if (VGMCommand_isYM2612Write(command))

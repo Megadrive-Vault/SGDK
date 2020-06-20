@@ -9,36 +9,36 @@
  * The software bitmap engine permit to simulate a 256x160 pixels bitmap screen.<br>
  * Bitmap engine requires a large amount of memory (~41KB) which is dynamically allocated at BMP_init(..) time and released when BMP_end() is called.<br>
  * Bitmap engine uses a double buffer so you can draw to the write buffer while the read buffer is being sent to video memory.<br>
- * These buffers are transfered to VRAM during blank area, by default on NTSC system the blanking period is really short so it takes approximately 10 frames to blit an entire buffer.<br>
+ * These buffers are transferred to VRAM during blank area, by default on NTSC system the blanking period is really short so it takes approximately 10 frames to blit an entire buffer.<br>
  * To improve transfer performance the blank area is extended to fit bitmap resolution:<br>
  * scanline 0-31 = blank<br>
  * scanline 32-191 = active<br>
  * scanline 192-262/312 = blank<br>
  * <br>
- * With extended blank bitmap buffer can be transfered to VRAM 20 times per second in NTSC<br>
+ * With extended blank bitmap buffer can be transferred to VRAM 20 times per second in NTSC<br>
  * and 25 time per second in PAL.
  */
 
 #include "maths.h"
 #include "vdp.h"
-#include "vdp_pal.h"
+#include "pal.h"
 
 #ifndef _BMP_H_
 #define _BMP_H_
 
 
-#define BMP_PLANWIDTH_SFT           planWidthSft
-#define BMP_PLANHEIGHT_SFT          planHeightSft
+#define BMP_PLANWIDTH_SFT           planeWidthSft
+#define BMP_PLANHEIGHT_SFT          planeHeightSft
 /**
  *  \brief
- *          Bitmap plan width (in tile)
+ *          Bitmap plane width (in tile)
  */
-#define BMP_PLANWIDTH               planWidth
+#define BMP_PLANWIDTH               planeWidth
 /**
  *  \brief
- *          Bitmap plan height (in tile)
+ *          Bitmap plane height (in tile)
  */
-#define BMP_PLANHEIGHT              planHeight
+#define BMP_PLANHEIGHT              planeHeight
 
 #define BMP_CELLWIDTH_SFT           5
 /**
@@ -154,7 +154,7 @@
  *  \param palette
  *      Palette data.
  *  \param image
- *      Image data, array size = (w * h / 2).
+ *      Image data, array size = (w * h / 2) - can be FAR pointer (see mapper.h unit for explaination)
  */
 typedef struct
 {
@@ -240,23 +240,23 @@ extern u8 *bmp_buffer_write;
  *  \param double_buffer
  *      Enabled VRAM double buffer.<br>
  *      VRAM Double buffer permit to avoid image tearing because of partial screen refresh.<br>
- *      It requires almost all VRAM tiles space (~41 KB) so enable it only if you don't need other plan or sprites.
- *  \param plan
- *      Plan to use to display the bitmap.<br>
+ *      It requires almost all VRAM tiles space (~41 KB) so enable it only if you don't need other plane or sprites.
+ *  \param plane
+ *      Plane to use to display the bitmap.<br>
  *      Accepted values are:<br>
- *      - PLAN_A<br>
- *      - PLAN_B<br>
+ *      - BG_A<br>
+ *      - BG_B<br>
  *  \param palette
- *      Palette index to use to render the bitmap plan.<br>
+ *      Palette index to use to render the bitmap plane.<br>
  *      Set it to 0 if unsure.
  *  \param priority
- *      Set the priority of bitmap plan.<br>
+ *      Set the priority of bitmap plane.<br>
  *      0 = low priority (default).<br>
  *      1 = high priority.
  *
  * Requires ~41 KB of memory which is dynamically allocated.
  */
-void BMP_init(u16 double_buffer, VDPPlan plan, u16 palette, u16 priority);
+void BMP_init(u16 double_buffer, VDPPlane plane, u16 palette, u16 priority);
 /**
  *  \brief
  *      End the software bitmap engine.
@@ -276,7 +276,7 @@ void BMP_reset();
  *      Enable back buffer preservation.
  *
  * The bitmap engine is always using double buffering in maim memory so you can continue to write your bitmap
- * while the previous bitmap is being transfered to video memory.<br>
+ * while the previous bitmap is being transferred to video memory.<br>
  * The problem with double buffer is that your content is not preserved on a frame basis as you have 2 differents buffers,
  * by enabling "buffer copy" you can preserve your bitmap but this has an important CPU cost as we need to copy bitmap buffer
  * at each flip operation.<br>

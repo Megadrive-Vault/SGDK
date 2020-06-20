@@ -4,14 +4,22 @@
  *  \author Stephane Dallongeville
  *  \author Paspallas Dev
  *  \author Jack Nolddor
+ *  \author Jesus Alonso (doragasu)
  *  \date 08/2011
  *
  * This unit provides basic null terminated string operations and type conversions.
  */
 
+#if (ENABLE_NEWLIB == 1) && !defined(_NEWLIB_STRING_H_)
+#define _NEWLIB_STRING_H_
+#include_next <string.h> // Include string.h from newlib
+#undef _STRING_H_        // Will be defined again just below
+#endif
+
 #ifndef _STRING_H_
 #define _STRING_H_
 
+#if (ENABLE_NEWLIB == 0)
 
 /**
  *  \brief
@@ -23,19 +31,25 @@
 typedef void *__gnuc_va_list;
 typedef __gnuc_va_list va_list;
 
-#define __va_rounded_size(TYPE)  \
-  (((sizeof (TYPE) + sizeof (int) - 1) / sizeof (int)) * sizeof (int))
+#define va_start(v,l) __builtin_va_start(v,l)
+#define va_end(v) __builtin_va_end(v)
+#define va_arg(v,l) __builtin_va_arg(v,l)
 
-#define va_start(AP, LASTARG)                                           \
- (AP = ((__gnuc_va_list) __builtin_next_arg (LASTARG)))
-
-#define va_end(AP)      ((void)0)
-
-#define va_arg(AP, TYPE)                                                \
- (AP = (__gnuc_va_list) ((char *) (AP) + __va_rounded_size (TYPE)),     \
-  *((TYPE *) (void *) ((char *) (AP)                                    \
-                       - ((sizeof (TYPE) < __va_rounded_size (char)     \
-                           ? sizeof (TYPE) : __va_rounded_size (TYPE))))))
+/*
+//#define __va_rounded_size(TYPE)  \
+//  (((sizeof (TYPE) + sizeof (int) - 1) / sizeof (int)) * sizeof (int))
+//
+//#define va_start(AP, LASTARG)                                           \
+// (AP = ((__gnuc_va_list) __builtin_next_arg (LASTARG)))
+//
+//#define va_end(AP)      ((void)0)
+//
+//#define va_arg(AP, TYPE)                                                \
+// (AP = (__gnuc_va_list) ((char *) (AP) + __va_rounded_size (TYPE)),     \
+//  *((TYPE *) (void *) ((char *) (AP)                                    \
+//                       - ((sizeof (TYPE) < __va_rounded_size (char)     \
+//                           ? sizeof (TYPE) : __va_rounded_size (TYPE))))))
+*/
 
 /**
  *  \brief
@@ -84,17 +98,6 @@ s16 strcmp(const char *str1, const char *str2);
 
 /**
  *  \brief
- *      Clear a string.
- *
- *  \param str
- *      string to clear.
- *  \return pointer on the given string.
- *
- * Clear the specified string.
- */
-char* strclr(char *str);
-/**
- *  \brief
  *      Copy a string.
  *
  *  \param dest
@@ -136,6 +139,46 @@ char* strncpy(char *dest, const char *src, u16 len);
 char* strcat(char *dest, const char *src);
 /**
  *  \brief
+ *      Composes a string with the same text that would be printed if format was used on printf,
+ *      but instead of being printed, the content is stored as a C string in the buffer pointed by str.
+ *
+ *  \param buffer
+ *      Destination string (it must be large enough to receive result).
+ *  \param fmt
+ *      C string that contains the text to be written to destination string.<br />
+ *      It can optionally contain embedded format specifiers.
+ *
+ *  \param ... (additional arguments)
+ *      Depending on the format string, the function may expect a sequence of additional arguments, <br>
+ *      each containing a value to be used to replace a format specifier in the format string.
+ *
+ *      There should be at least as many of these arguments as the number of values specified in the format specifiers. <br>
+ *      Additional arguments are ignored by the function.
+ *
+ *  \return On success, the total number of characters written is returned..
+ *
+ *  Copy the string pointed by 'fmt' param to the 'buffer' param.<br>
+ *  If 'fmt' includes format specifiers (subsequences beginning with %), the additional arguments following format are
+ *  formatted and inserted in the resulting string replacing their respective specifiers
+ *
+ */
+u16 sprintf(char *buffer,const char *fmt, ...) __attribute__ ((format (printf, 2, 3)));
+
+#endif  // ENABLE_NEWLIB
+
+/**
+ *  \brief
+ *      Clear a string.
+ *
+ *  \param str
+ *      string to clear.
+ *  \return pointer on the given string.
+ *
+ * Clear the specified string.
+ */
+char* strclr(char *str);
+/**
+ *  \brief
  *      Replace the given character in a string.
  *
  *  \param str
@@ -151,10 +194,10 @@ char* strcat(char *dest, const char *src);
 char *strreplacechar(char *str, char oldc, char newc);
 /**
  *  \brief
- *      Convert a s32 value to string.
+ *      Convert a s32 value to string (input value should be in [-500000000..500000000] range).
  *
  *  \param value
- *      The s32 integer value to convert to string.
+ *      The s32 integer value to convert to string (input value should be in [-500000000..500000000] range).
  *  \param str
  *      Destination string (it must be large enough to receive result).
  *  \param minsize
@@ -167,10 +210,10 @@ char *strreplacechar(char *str, char oldc, char newc);
 u16 intToStr(s32 value, char *str, u16 minsize);
 /**
  *  \brief
- *      Convert a u32 value to string.
+ *      Convert a u32 value to string (input value should be in [0..500000000] range).
  *
  *  \param value
- *      The u32 integer value to convert to string.
+ *      The u32 integer value to convert to string (input value should be in [0..500000000] range).
  *  \param str
  *      Destination string (it must be large enough to receive result).
  *  \param minsize
@@ -181,38 +224,6 @@ u16 intToStr(s32 value, char *str, u16 minsize);
  * If resulting value is shorter than requested minsize the method prepends result with '0' character.
  */
 u16 uintToStr(u32 value, char *str, u16 minsize);
-/**
- *  \brief
- *      Convert a s16 value to string (faster than the 32-bit version).
- *
- *  \param value
- *      The s16 integer value to convert to string.
- *  \param str
- *      Destination string (it must be large enough to receive result).
- *  \param minsize
- *      Minimum size of resulting string.
- *  \return string length
- *
- * Converts the specified s16 value to string.<br>
- * If resulting value is shorter than requested minsize the method prepends result with '0' character.
- */
-u16 int16ToStr(s16 value, char *str, u16 minsize);
-/**
- *  \brief
- *      Convert a u16 value to string (faster than the 32-bit version).
- *
- *  \param value
- *      The u16 integer value to convert to string.
- *  \param str
- *      Destination string (it must be large enough to receive result).
- *  \param minsize
- *      Minimum size of resulting string.
- *  \return string length
- *
- * Converts the specified u16 value to string.<br>
- * If resulting value is shorter than requested minsize the method prepends result with '0' character.
- */
-u16 uint16ToStr(u16 value, char *str, u16 minsize);
 /**
  *  \brief
  *      Convert a u32 value to hexadecimal string.
@@ -257,34 +268,6 @@ void fix32ToStr(fix32 value, char *str, u16 numdec);
  * Converts the specified fix16 value to string.<br>
  */
 void fix16ToStr(fix16 value, char *str, u16 numdec);
-
-/**
- *  \brief
- *      Composes a string with the same text that would be printed if format was used on printf,
- *      but instead of being printed, the content is stored as a C string in the buffer pointed by str.
- *
- *  \param buffer
- *      Destination string (it must be large enough to receive result).
- *  \param fmt
- *      C string that contains the text to be written to destination string.<br />
- *      It can optionally contain embedded format specifiers.
- *
- *  \param ... (additional arguments)
- *      Depending on the format string, the function may expect a sequence of additional arguments, <br>
- *      each containing a value to be used to replace a format specifier in the format string.
- *
- *      There should be at least as many of these arguments as the number of values specified in the format specifiers. <br>
- *      Additional arguments are ignored by the function.
- *
- *  \return On success, the total number of characters written is returned..
- *
- *  Copy the string pointed by 'fmt' param to the 'buffer' param.<br>
- *  If 'fmt' includes format specifiers (subsequences beginning with %), the additional arguments following format are
- *  formatted and inserted in the resulting string replacing their respective specifiers
- *
- */
-u16 sprintf(char *buffer,const char *fmt, ...) __attribute__ ((format (printf, 2, 3)));
-
 
 #endif // _STRING_H_
 

@@ -4,8 +4,10 @@
 #include "sys.h"
 
 #include "memory.h"
+#include "mapper.h"
 #include "vdp.h"
 #include "vdp_pal.h"
+#include "vdp_spr.h"
 #include "psg.h"
 #include "ym2612.h"
 #include "joy.h"
@@ -17,7 +19,6 @@
 #include "vdp.h"
 #include "vdp_bg.h"
 #include "vdp_pal.h"
-#include "tile_cache.h"
 #include "sound.h"
 #include "xgm.h"
 #include "dma.h"
@@ -26,53 +27,72 @@
 #include "kdebug.h"
 
 #if (ENABLE_LOGO != 0)
+#define LOGO_SIZE                   64
+
 #include "libres.h"
 #endif
 
 
-#define IN_VINT         1
-#define IN_HINT         2
-#define IN_EXTINT       4
+#define IN_VINT                     1
+#define IN_HINT                     2
+#define IN_EXTINT                   4
+
+#define FORCE_VINT_VBLANK_ALIGN     (1 << 0)
+#define SHOW_FRAME_LOAD             (1 << 1)
+
+#define VINT_ALLOWED_LINE_DELAY     4
+
+#define LOAD_MEAN_FRAME_NUM         8
 
 
 // we don't want to share them
 extern u16 randbase;
-extern TileSet** uploads;
-extern s16 currentDriver;
+extern u16 currentDriver;
+// size of text segment --> start of initialized data (RO)
+extern u32 _stext;
+// size of initialized data segment
+extern u32 _sdata;
+// last V-Counter on VDP_waitVSycn() / VDP_waitVInt() call
+extern u16 lastVCnt;
 
 // extern library callback function (we don't want to share them)
 extern u16 BMP_doHBlankProcess();
 extern void BMP_doVBlankProcess();
-extern void TC_doVBlankProcess();
 extern u16 SPR_doVBlankProcess();
 extern void XGM_doVBlankProcess();
+
+// we don't want to share that method
+extern void MEM_init();
 
 // main function
 extern int main(u16 hard);
 
+// forward
 static void internal_reset();
+// this one can't be static (used by vdp.c)
+void addFrameLoad(u16 frameLoad);
 
 // exception callbacks
-_voidCallback *busErrorCB;
-_voidCallback *addressErrorCB;
-_voidCallback *illegalInstCB;
-_voidCallback *zeroDivideCB;
-_voidCallback *chkInstCB;
-_voidCallback *trapvInstCB;
-_voidCallback *privilegeViolationCB;
-_voidCallback *traceCB;
-_voidCallback *line1x1xCB;
-_voidCallback *errorExceptionCB;
-_voidCallback *intCB;
-_voidCallback *internalVIntCB;
-_voidCallback *internalHIntCB;
-_voidCallback *internalExtIntCB;
+VoidCallback *busErrorCB;
+VoidCallback *addressErrorCB;
+VoidCallback *illegalInstCB;
+VoidCallback *zeroDivideCB;
+VoidCallback *chkInstCB;
+VoidCallback *trapvInstCB;
+VoidCallback *privilegeViolationCB;
+VoidCallback *traceCB;
+VoidCallback *line1x1xCB;
+VoidCallback *errorExceptionCB;
+VoidCallback *intCB;
+VoidCallback *internalVIntCB;
+VoidCallback *internalHIntCB;
+VoidCallback *internalExtIntCB;
 
 // user V-Int, H-Int and Ext-Int callbacks
-static _voidCallback *VIntCBPre;
-static _voidCallback *VIntCB;
-static _voidCallback *HIntCB;
-static _voidCallback *ExtIntCB;
+static VoidCallback *VIntCBPre;
+static VoidCallback *VIntCB;
+static VoidCallback *HIntCB;
+static VoidCallback *ExtIntCB;
 
 
 // exception state consumes 78 bytes of memory
@@ -88,8 +108,18 @@ __attribute__((externally_visible)) vu32 HIntProcess;
 __attribute__((externally_visible)) vu32 ExtIntProcess;
 __attribute__((externally_visible)) vu16 intTrace;
 
-static u16 intLevelSave;
+// need to be accessed from external
+u16 intLevelSave;
 static s16 disableIntStack;
+static u16 flags;
+static u32 missedFrames;
+
+// store last frames CPU load (in [0..255] range), need to shared as it can be updated by vdp.c unit
+static u16 frameLoads[LOAD_MEAN_FRAME_NUM];
+static u16 frameLoadIndex;
+static u16 cpuFrameLoad;
+static u32 frameCnt;
+static u32 lastSubTick;
 
 
 static void addValueU8(char *dst, char *str, u8 value)
@@ -273,6 +303,7 @@ static u16 showBusAddressErrorDump(u16 pos)
 // bus error default callback
 void _buserror_callback()
 {
+    SYS_setInterruptMaskLevel(7);
     VDP_init();
     VDP_drawText("BUS ERROR !", 10, 3);
 
@@ -284,6 +315,7 @@ void _buserror_callback()
 // address error default callback
 void _addresserror_callback()
 {
+    SYS_setInterruptMaskLevel(7);
     VDP_init();
     VDP_drawText("ADDRESS ERROR !", 10, 3);
 
@@ -295,6 +327,7 @@ void _addresserror_callback()
 // illegal instruction exception default callback
 void _illegalinst_callback()
 {
+    SYS_setInterruptMaskLevel(7);
     VDP_init();
     VDP_drawText("ILLEGAL INSTRUCTION !", 7, 3);
 
@@ -306,6 +339,7 @@ void _illegalinst_callback()
 // division by zero exception default callback
 void _zerodivide_callback()
 {
+    SYS_setInterruptMaskLevel(7);
     VDP_init();
     VDP_drawText("DIVIDE BY ZERO !", 10, 3);
 
@@ -317,6 +351,7 @@ void _zerodivide_callback()
 // CHK instruction default callback
 void _chkinst_callback()
 {
+    SYS_setInterruptMaskLevel(7);
     VDP_init();
     VDP_drawText("CHK INSTRUCTION EXCEPTION !", 5, 10);
 
@@ -328,6 +363,7 @@ void _chkinst_callback()
 // TRAPV instruction default callback
 void _trapvinst_callback()
 {
+    SYS_setInterruptMaskLevel(7);
     VDP_init();
     VDP_drawText("TRAPV INSTRUCTION EXCEPTION !", 5, 3);
 
@@ -339,6 +375,7 @@ void _trapvinst_callback()
 // privilege violation exception default callback
 void _privilegeviolation_callback()
 {
+    SYS_setInterruptMaskLevel(7);
     VDP_init();
     VDP_drawText("PRIVILEGE VIOLATION !", 5, 3);
 
@@ -362,6 +399,7 @@ void _line1x1x_callback()
 // error exception default callback
 void _errorexception_callback()
 {
+    SYS_setInterruptMaskLevel(7);
     VDP_init();
     VDP_drawText("EXCEPTION ERROR !", 5, 3);
 
@@ -380,20 +418,68 @@ void _int_callback()
 // V-Int Callback
 void _vint_callback()
 {
-    u16 vintp;
+    const u16 vcnt = GET_VCOUNTER;
 
     intTrace |= IN_VINT;
-
     vtimer++;
+
+    // detect if we are too late
+    bool late = FALSE;
+
+    // we cannot detect late frame if HV latching is enabled..
+    if (!VDP_getHVLatching())
+    {
+        // V28 mode --> we expect V counter to be in [224..227] range
+        if (VDP_getScreenHeight() == 224)
+        {
+            // V Counter outside expected range ? (rollback in PAL mode can mess up the test here..)
+            if ((vcnt < 224) || (vcnt > (224 + VINT_ALLOWED_LINE_DELAY))) late = TRUE;
+        }
+        // V30 mode --> we expect V counter to be in [240..243] range
+        else
+        {
+            // V Counter outside expected range ? (rollback in PAL mode can mess up the test here..)
+            if ((vcnt < 240) || (vcnt > (240 + VINT_ALLOWED_LINE_DELAY))) late = TRUE;
+        }
+    }
+
+    // interrupt happened too late ?
+    if (late)
+    {
+        // we increase the number of missed frame
+        missedFrames++;
+        // assume 100% CPU usage (0-255 value) when V-Int happened too late
+        addFrameLoad(255);
+
+        // V-Interrupt VBlank alignment forced ? --> we force wait of next VBlank (and so V-Int)
+        if (flags & FORCE_VINT_VBLANK_ALIGN)
+        {
+#if (LIB_DEBUG != 0)
+            KLog_U2("Warning: forced V-Int delay for VBlank alignment (frame miss) on frame #", vtimer, " - VCounter = ", vcnt);
+#endif
+
+            VDP_waitVSync();
+
+            // we need to return from interrupt as we don't have anyway to clear the new pending interrupt
+            // so we will take it again immediately but in time this time :)
+            intTrace &= ~IN_VINT;
+
+            return;
+        }
+
+#if (LIB_DEBUG != 0)
+        KLog_U2("Warning: V-Int happened too late (possible frame miss) for frame #", vtimer, " - VCounter = ", vcnt);
+#endif
+    }
 
     // call user callback (pre V-Int)
     if (VIntCBPre) VIntCBPre();
 
-    vintp = VIntProcess;
+    u16 vintp = VIntProcess;
     // may worth it
     if (vintp)
     {
-        // xgm processing (have to be done first !)
+        // xgm processing (have to be done first, before DMA)
         if (vintp & PROCESS_XGM_TASK)
             XGM_doVBlankProcess();
 
@@ -419,19 +505,35 @@ void _vint_callback()
             vintp &= ~PROCESS_DMA_TASK;
         }
 
-        // tile cache processing
-        if (vintp & PROCESS_TILECACHE_TASK)
-            TC_doVBlankProcess();
         // bitmap processing
         if (vintp & PROCESS_BITMAP_TASK)
             BMP_doVBlankProcess();
         // palette fading processing
         if (vintp & PROCESS_PALETTE_FADING)
         {
-            if (!VDP_doStepFading(FALSE)) vintp &= ~PROCESS_PALETTE_FADING;
+            if (!VDP_doFadingStep()) vintp &= ~PROCESS_PALETTE_FADING;
         }
 
         VIntProcess = vintp;
+    }
+
+    // frame load display enabled ?
+    if (flags & SHOW_FRAME_LOAD)
+    {
+        // use internal sprite 0 to show cursor
+        VDPSprite* vdpSprite = &vdpSpriteCache[0];
+
+        // update position relative to last stored VCounter
+        if ((lastVCnt > 224) || (lastVCnt < 4)) vdpSprite->y = 0x80;
+        else if (lastVCnt > 220) vdpSprite->y = 220 + 0x80;
+        else vdpSprite->y = lastVCnt + (0x80 - 4);
+
+        // write immediately in VRAM the sprite position change
+        vu16* pw = (u16 *) GFX_DATA_PORT;
+        vu32* pl = (u32 *) GFX_CTRL_PORT;
+
+        *pl = GFX_WRITE_VRAM_ADDR(VDP_SPRITE_TABLE);
+        *pw = vdpSprite->y;
     }
 
     // then call user callback
@@ -482,7 +584,41 @@ void _extint_callback()
 
 void _start_entry()
 {
-    // initiate random number generator
+    u32 banklimit;
+    u16* src;
+    u16* dst;
+    u16 len;
+
+    // clear all RAM (DO NOT USE FUNCTION HERE as we clear all RAM so the stack as well)
+    dst = (u16*) RAM;
+    len = 0x8000;
+    while(len--) *dst++ = 0;
+
+    // then do variables initialization (those which have specific value)
+
+    // point to start of RO initialized data
+    src = (u16*) &_stext;
+    // point to start initialized variable (always start at beginning of ram)
+    dst = (u16*) RAM;
+    // get number of byte to copy
+    len = (u16)(u32)(&_sdata);
+    // convert to word
+    len = (len + 1) / 2;
+
+    // get bank limit in word (bank size is 512KB)
+    banklimit = (0x80000 - (((u32)src) & 0x7FFFF)) >> 1;
+    // bank limit exceeded ?
+    if (len > banklimit)
+    {
+        // we first do the second bank part
+        memcpyU16(dst + banklimit, FAR(src + banklimit), len - banklimit);
+        // adjust len
+        len = banklimit;
+    }
+    // initialize "initialized variables"
+    memcpyU16(dst, FAR(src), len);
+
+    // initialize random number generator
     setRandomSeed(0xC427);
     vtimer = 0;
 
@@ -506,7 +642,7 @@ void _start_entry()
 
 #if (ENABLE_LOGO != 0)
     {
-        Bitmap *logo = unpackBitmap(&logo_lib, NULL);
+        Bitmap *logo = unpackBitmap(&sgdk_logo, NULL);
 
         // correctly unpacked
         if (logo)
@@ -514,16 +650,14 @@ void _start_entry()
             const Palette *logo_pal = logo->palette;
 
             // display logo (use BMP mode for that)
-            BMP_init(TRUE, PAL0, FALSE);
+            BMP_init(TRUE, BG_A, PAL0, FALSE);
 
     #if (ZOOMING_LOGO != 0)
             // init fade in to 30 step
-            u16 step_fade = 30;
-
-            if (VDP_initFading(logo_pal->index, logo_pal->index + (logo_pal->length - 1), palette_black, logo_pal->data, step_fade))
+            if (VDP_initFading(0, logo_pal->length - 1, palette_black, logo_pal->data, 30))
             {
                 // prepare zoom
-                u16 size = 256;
+                u16 size = LOGO_SIZE;
 
                 // while zoom not completed
                 while(size > 0)
@@ -534,41 +668,41 @@ void _start_entry()
                     else size = 0;
 
                     // get new size
-                    const u32 w = 256 - size;
+                    const u32 w = LOGO_SIZE - size;
 
                     // adjust palette for fade
-                    if (step_fade-- > 0) VDP_doStepFading(FALSE);
+                    VDP_doFadingStep();
 
                     // zoom logo
-                    BMP_loadAndScaleBitmap(logo, 64 + ((256 - w) >> 2), (256 - w) >> 1, w >> 1, w >> 1, FALSE);
+                    BMP_loadAndScaleBitmap(logo, 128 - (w >> 1), 80 - (w >> 1), w, w, FALSE);
                     // flip to screen
-                    BMP_flip(0);
+                    BMP_flip(FALSE);
                 }
 
                 // while fade not completed
-                while(step_fade--) VDP_doStepFading(TRUE);
+                while(VDP_doFadingStep());
             }
 
             // wait 1 second
             waitTick(TICKPERSECOND * 1);
     #else
             // set palette 0 to black
-            VDP_setPalette(PAL0, palette_black);
+            PAL_setPalette(PAL0, palette_black);
 
             // don't load the palette immediatly
-            BMP_loadBitmap(logo, 64, 0, FALSE);
+            BMP_loadBitmap(logo, 128 - (LOGO_SIZE / 2), 80 - (LOGO_SIZE / 2), FALSE);
             // flip
             BMP_flip(0);
 
             // fade in logo
-            VDP_fade((PAL0 << 4) + logo_pal->index, (PAL0 << 4) + (logo_pal->index + (logo_pal->length - 1)), palette_black, logo_pal->data, 30, FALSE);
+            PAL_fade((PAL0 << 4), (PAL0 << 4) + (logo_pal->length - 1), palette_black, logo_pal->data, 30, FALSE);
 
             // wait 1.5 second
             waitTick(TICKPERSECOND * 1.5);
     #endif
-
             // fade out logo
-            VDP_fadePalOut(PAL0, 20, 0);
+            PAL_fadeOutPalette(PAL0, 20, FALSE);
+
             // wait 0.5 second
             waitTick(TICKPERSECOND * 0.5);
 
@@ -584,6 +718,9 @@ void _start_entry()
 
     // let's the fun go on !
     main(1);
+
+    // for safety
+    while(TRUE);
 }
 
 void _reset_entry()
@@ -591,8 +728,10 @@ void _reset_entry()
     internal_reset();
 
     main(0);
-}
 
+    // for safety
+    while(TRUE);
+}
 
 static void internal_reset()
 {
@@ -606,13 +745,26 @@ static void internal_reset()
     intLevelSave = 0;
     disableIntStack = 0;
 
-    // reset variables which own engine initialization state
-    uploads = NULL;
+    // default
+    flags = FORCE_VINT_VBLANK_ALIGN;
+    missedFrames = 0;
 
-    // init part
+    // reset frame load monitor
+    memsetU16(frameLoads, 0, LOAD_MEAN_FRAME_NUM);
+    frameLoadIndex = 0;
+    cpuFrameLoad = 0;
+    frameCnt = 0;
+    lastSubTick = 0;
+
+    // safe to check for DMA completion before dealing with VDP (this also clear internal VDP latch)
+    // WARNING: it's important to not access the VDP too soon or you can lock the system (it's why we do it just here) !
+    while(GET_VDPSTATUS(VDP_DMABUSY_FLAG));
+
+    // init part (always do MEM_init() first)
     MEM_init();
+    DMA_init();
+    DMA_setMaxTransferSizeToDefault();
     VDP_init();
-    DMA_init(0, 0);
     PSG_init();
     JOY_init();
     // reseting z80 also reset the ym2612
@@ -628,7 +780,7 @@ void SYS_disableInts()
     if (intTrace != 0)
     {
 #if (LIB_DEBUG != 0)
-        KDebug_Alert("SYS_disableInts() fails: call during interrupt");
+        // KDebug_Alert("SYS_disableInts() fails: call during interrupt");
 #endif
 
         return;
@@ -639,7 +791,7 @@ void SYS_disableInts()
         intLevelSave = SYS_getAndSetInterruptMaskLevel(7);
 #if (LIB_DEBUG != 0)
     else
-        KDebug_Alert("SYS_disableInts() info: inner call");
+        KLog_U1("SYS_disableInts() info: inner call = ", disableIntStack);
 #endif
 }
 
@@ -649,7 +801,7 @@ void SYS_enableInts()
     if (intTrace != 0)
     {
 #if (LIB_DEBUG != 0)
-        KDebug_Alert("SYS_enableInts() fails: call during interrupt");
+        // KDebug_Alert("SYS_enableInts() fails: call during interrupt");
 #endif
 
         return;
@@ -662,31 +814,93 @@ void SYS_enableInts()
     else
     {
         if (disableIntStack < 0)
-            KDebug_Alert("SYS_enableInts() fails: already enabled");
+            KLog_U1("SYS_enableInts() fails: already enabled = ", disableIntStack);
         else
-            KDebug_Alert("SYS_enableInts() info: inner call");
+            KLog_U1("SYS_enableInts() info: inner call = ", disableIntStack);
     }
 #endif
 }
 
-void SYS_setVIntPreCallback(_voidCallback *CB)
+void SYS_setVIntPreCallback(VoidCallback *CB)
 {
     VIntCBPre = CB;
 }
 
-void SYS_setVIntCallback(_voidCallback *CB)
+void SYS_setVIntCallback(VoidCallback *CB)
 {
     VIntCB = CB;
 }
 
-void SYS_setHIntCallback(_voidCallback *CB)
+void SYS_setHIntCallback(VoidCallback *CB)
 {
     HIntCB = CB;
 }
 
-void SYS_setExtIntCallback(_voidCallback *CB)
+void SYS_setExtIntCallback(VoidCallback *CB)
 {
     ExtIntCB = CB;
+}
+
+void SYS_setVIntAligned(bool value)
+{
+    if (value) flags |= FORCE_VINT_VBLANK_ALIGN;
+    else flags &= ~FORCE_VINT_VBLANK_ALIGN;
+}
+
+u16 SYS_isVIntAligned()
+{
+    return (flags & FORCE_VINT_VBLANK_ALIGN)?TRUE:FALSE;
+}
+
+void SYS_showFrameLoad()
+{
+    flags |= SHOW_FRAME_LOAD;
+
+    // use internal sprite 0 to show cursor
+    VDPSprite* vdpSprite = &vdpSpriteCache[0];
+    vdpSprite->y = 0;
+    vdpSprite->size = SPRITE_SIZE(1, 1);
+    // point on left cursor tile in font
+    vdpSprite->attribut = TILE_ATTR_FULL(PAL0, TRUE, FALSE, FALSE, TILE_FONTINDEX + 94);
+    vdpSprite->x = 0x80;
+
+    SYS_disableInts();
+
+    // apply changes immediately in VRAM
+    vu16* pw = (u16 *) GFX_DATA_PORT;
+    vu32* pl = (u32 *) GFX_CTRL_PORT;
+
+    *pl = GFX_WRITE_VRAM_ADDR(VDP_SPRITE_TABLE);
+
+    // write fields in correct order
+    *pw = vdpSprite->y;
+    *pw = vdpSprite->size_link;
+    *pw = vdpSprite->attribut;
+    *pw = vdpSprite->x;
+
+    SYS_enableInts();
+}
+
+void SYS_hideFrameLoad()
+{
+    flags &= ~SHOW_FRAME_LOAD;
+
+    // use internal sprite 0 to show cursor
+    VDPSprite* vdpSprite = &vdpSpriteCache[0];
+    // hide it
+    vdpSprite->y = 0;
+
+    SYS_disableInts();
+
+    // apply changes immediately in VRAM
+    vu16* pw = (u16 *) GFX_DATA_PORT;
+    vu32* pl = (u32 *) GFX_CTRL_PORT;
+
+    *pl = GFX_WRITE_VRAM_ADDR(VDP_SPRITE_TABLE);
+    // no need to write more
+    *pw = vdpSprite->y;
+
+    SYS_enableInts();
 }
 
 u16 SYS_isInVIntCallback()
@@ -719,8 +933,94 @@ u16 SYS_isPAL()
     return IS_PALSYSTEM;
 }
 
+
+u32 SYS_getFPS()
+{
+    static s32 result;
+    const u32 current = getSubTick();
+    u32 delta = current - lastSubTick;
+
+    if ((delta > 19200) && ((frameCnt > (76800 * 5)) || (delta > 76800)))
+    {
+        result = frameCnt / delta;
+        if (result > 999) result = 999;
+        lastSubTick = current;
+        frameCnt = 76800;
+    }
+    else frameCnt += 76800;
+
+    return result;
+}
+
+fix32 SYS_getFPSAsFloat()
+{
+    static fix32 result;
+    const s32 current = getSubTick();
+    u32 delta = current - lastSubTick;
+
+    if ((delta > 19200) && ((frameCnt > (76800 * 5)) || (delta > 76800)))
+    {
+        if (frameCnt > (250 * 76800)) result = FIX32((u32) 999);
+        else
+        {
+            result = (frameCnt << FIX16_FRAC_BITS) / delta;
+            if (result > (999 << FIX16_FRAC_BITS)) result = FIX32((u32)999);
+            else result <<= (FIX32_FRAC_BITS - FIX16_FRAC_BITS);
+        }
+
+        lastSubTick = current;
+        frameCnt = 76800;
+    }
+    else frameCnt += 76800;
+
+    return result;
+}
+
+
+// used to compute average frame load on 8 frames
+void addFrameLoad(u16 frameLoad)
+{
+    static u16 lastMissedFrame = 0;
+    static u16 lastVTimer = 0;
+
+    u16 v = frameLoad;
+    // force full load if we have frame miss
+    if ((lastMissedFrame != missedFrames) || ((vtimer - lastVTimer) > 1))
+    {
+        lastMissedFrame = missedFrames;
+        v = 255;
+
+//#if (LIB_DEBUG != 0)
+//        KLog("FrameLoad: frame missed detection, force max frame load (255)");
+//#endif
+    }
+
+    cpuFrameLoad -= frameLoads[frameLoadIndex];
+    frameLoads[frameLoadIndex] = v;
+    cpuFrameLoad += v;
+    frameLoadIndex = (frameLoadIndex + 1) & (LOAD_MEAN_FRAME_NUM - 1);
+    lastVTimer = vtimer;
+}
+
+u16 SYS_getCPULoad()
+{
+   return (cpuFrameLoad * ((u16) 100)) / (u16) (LOAD_MEAN_FRAME_NUM * 255);
+}
+
+u32 SYS_getMissedFrames()
+{
+    return missedFrames;
+}
+
+void SYS_resetMissedFrames()
+{
+    missedFrames = 0;
+}
+
+
 void SYS_die(char *err)
 {
+    SYS_setInterruptMaskLevel(7);
     VDP_init();
     VDP_drawText("A fatal error occured !", 2, 2);
     VDP_drawText("cannot continue...", 4, 3);

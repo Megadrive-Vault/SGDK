@@ -176,7 +176,7 @@ void MEM_init()
     KLog_U1("MEM_init: heap = ", (u32) heap);
 #endif
 
-    // free memory : whole heap
+    // free memory: whole heap
     free = heap;
 
     // mark end of heap memory
@@ -197,6 +197,35 @@ u16 MEM_getFree()
         // memory block not used --> add available size to result
         if (!(bsize & USED))
             res += bsize;
+
+        // pass to next block
+        b += bsize >> 1;
+    }
+
+    return res;
+}
+
+u16 MEM_getLargestFreeBlock()
+{
+    u16* b;
+    u16 bsize;
+    u16 csize;
+    u16 res;
+
+    b = heap;
+    res = 0;
+    csize = 0;
+
+    while ((bsize = *b))
+    {
+        // memory block is used --> reset cumulated size
+        if (bsize & USED) csize = 0;
+        else
+        {
+            csize += bsize;
+            // largest available bloc ?
+            if (csize > res) res = csize;
+        }
 
         // pass to next block
         b += bsize >> 1;
@@ -227,13 +256,6 @@ u16 MEM_getAllocated()
     return res;
 }
 
-void MEM_free(void *ptr)
-{
-    // valid block --> mark block as no more used
-    if (ptr)
-        ((u16*)ptr)[-1] &= ~USED;
-}
-
 void* MEM_alloc(u16 size)
 {
     u16* p;
@@ -254,7 +276,10 @@ void* MEM_alloc(u16 size)
         if (p == NULL)
         {
 #if (LIB_DEBUG != 0)
-            KDebug_Alert("MEM_alloc failed: no enough memory !");
+            if (size > MEM_getFree())
+                KLog_U2_("MEM_alloc(", size, ") failed: no enough free memory (free = ", MEM_getFree(), ")");
+            else
+                KLog_U3_("MEM_alloc(", size, ") failed: cannot find a big enough memory block (largest free block = ", MEM_getLargestFreeBlock(), " - free = ", MEM_getFree(), ")");
 #endif
 
             return NULL;
@@ -288,9 +313,89 @@ void* MEM_alloc(u16 size)
     // set block size, mark as used and point to free region
     *p++ = adjsize | USED;
 
+#if (LIB_DEBUG != 0)
+    KLog_U3("MEM_alloc(", size, ") success: ", (u32) p, " - remaining = ", MEM_getFree());
+#endif
+
     // return block
     return p;
 }
+
+void MEM_free(void *ptr)
+{
+    // valid block ?
+    if (ptr)
+    {
+#if (LIB_DEBUG != 0)
+        // not in use ?
+        if (!(((u16*)ptr)[-1] & USED))
+        {
+            KLog_U1_("MEM_free(", (u32) ptr, ") failed: block is not allocated !");
+            return;
+        }
+#endif
+
+        // mark block as no more used
+        ((u16*)ptr)[-1] &= ~USED;
+
+#if (LIB_DEBUG != 0)
+        KLog_U2("MEM_free(", (u32) ptr, ") --> remaining = ", MEM_getFree());
+#endif
+    }
+}
+
+void MEM_pack()
+{
+    u16 *b;
+    u16 *best;
+    u16 bsize, psize;
+    bool first;
+
+    b = heap;
+    best = b;
+    bsize = 0;
+    first = TRUE;
+
+    while ((psize = *b))
+    {
+        if (psize & USED)
+        {
+            if (bsize != 0)
+            {
+                // first free block found ?
+                if (first)
+                {
+                    // reset next free block
+                    free = best;
+                    first = FALSE;
+                }
+
+                // store packed free memory for this block
+                *best = bsize;
+                // reset packed free size
+                bsize = 0;
+            }
+
+            // point to next memory block
+            b += psize >> 1;
+            // remember it in case it becomes free
+            best = b;
+        }
+        else
+        {
+            // increment free size
+            bsize += psize;
+            // clear this memory block as it will be packed
+            *b = 0;
+            // point to next memory block
+            b += psize >> 1;
+        }
+    }
+
+    // last free block update
+    if (bsize != 0) *best = bsize;
+}
+
 
 void MEM_dump()
 {
@@ -375,34 +480,63 @@ static u16* pack(u16 nsize)
         {
             if (bsize != 0)
             {
+                // store packed free size
                 *best = bsize;
 
+                // return it if greater than what we're looking for
                 if (bsize >= nsize)
                     return best;
 
+                // reset packed free size
                 bsize = 0;
             }
 
+            // point to next memory block
             b += psize >> 1;
+            // remember it in case it becomes free
             best = b;
         }
         else
         {
+            // increment free size
             bsize += psize;
+            // clear this memory block as it will be packed
+            *b = 0;
+            // point to next memory block
             b += psize >> 1;
         }
     }
 
+    // last free block update
     if (bsize != 0)
     {
+        // store packed free size
         *best = bsize;
 
+        // return it if greater than what we're looking for
         if (bsize >= nsize)
             return best;
     }
 
     return NULL;
 }
+
+
+#if (ENABLE_NEWLIB == 0)
+extern void memset_(void *to, u8 value, u16 len);
+
+void __attribute__ ((noinline, used)) memset(void *to, u8 value, u16 len)
+{
+    memset_(to, value, len);
+}
+
+extern void memcpy_(void *to, const void *from, u16 len);
+
+void __attribute__ ((noinline, used)) memcpy(void *to, const void *from, u16 len)
+{
+    memcpy_(to, from, len);
+}
+#endif  // ENABLE_NEWLIB
 
 
 void memcpyU16(u16 *to, const u16 *from, u16 len)

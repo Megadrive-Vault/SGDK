@@ -24,77 +24,77 @@
  *
  * You can modify it to use your own callback (for debug purpose).
  */
-extern _voidCallback *busErrorCB;
+extern VoidCallback *busErrorCB;
 /**
  *  \brief
  *      Address error interrupt callback.
  *
  * You can modify it to use your own callback (for debug purpose).
  */
-extern _voidCallback *addressErrorCB;
+extern VoidCallback *addressErrorCB;
 /**
  *  \brief
  *      Illegal instruction exception callback.
  *
  * You can modify it to use your own callback (for debug purpose).
  */
-extern _voidCallback *illegalInstCB;
+extern VoidCallback *illegalInstCB;
 /**
  *  \brief
  *      Division by zero exception callback.
  *
  * You can modify it to use your own callback (for debug purpose).
  */
-extern _voidCallback *zeroDivideCB;
+extern VoidCallback *zeroDivideCB;
 /**
  *  \brief
  *      CHK instruction interrupt callback.
  *
  * You can modify it to use your own callback (for debug purpose).
  */
-extern _voidCallback *chkInstCB;
+extern VoidCallback *chkInstCB;
 /**
  *  \brief
  *      TRAPV instruction interrupt callback.
  *
  * You can modify it to use your own callback (for debug purpose).
  */
-extern _voidCallback *trapvInstCB;
+extern VoidCallback *trapvInstCB;
 /**
  *  \brief
  *      Privilege violation exception callback.
  *
  * You can modify it to use your own callback (for debug purpose).
  */
-extern _voidCallback *privilegeViolationCB;
+extern VoidCallback *privilegeViolationCB;
 /**
  *  \brief
  *      Trace interrupt callback.
  *
  * You can modify it to use your own callback (for debug purpose).
  */
-extern _voidCallback *traceCB;
+extern VoidCallback *traceCB;
 /**
  *  \brief
  *      Line 1x1x exception callback.
  *
  * You can modify it to use your own callback (for debug purpose).
  */
-extern _voidCallback *line1x1xCB;
+extern VoidCallback *line1x1xCB;
 /**
  *  \brief
  *      Error exception callback.
  *
  * You can modify it to use your own callback (for debug purpose).
  */
-extern _voidCallback *errorExceptionCB;
+extern VoidCallback *errorExceptionCB;
 /**
  *  \brief
  *      Level interrupt callback.
  *
  * You can modify it to use your own callback.
  */
-extern _voidCallback *intCB;
+extern VoidCallback *intCB;
 /**
  *  \brief
  *      Internal Vertical interrupt callback.
@@ -104,7 +104,7 @@ extern _voidCallback *intCB;
  * You should use it only for very low level process and if you don't care about SGDK facilities.<br>
  * In all others cases you would use the SYS_setVIntCallback() method.
  */
-extern _voidCallback *internalVIntCB;
+extern VoidCallback *internalVIntCB;
 /**
  *  \brief
  *      Internal Horizontal interrupt callback.
@@ -114,7 +114,7 @@ extern _voidCallback *internalVIntCB;
  * You should use it only for very low level process and if you don't care about SGDK facilities.<br>
  * In all others cases you would use the SYS_setHIntCallback() method.
  */
-extern _voidCallback *internalHIntCB;
+extern VoidCallback *internalHIntCB;
 /**
  *  \brief
  *      Internal External interrupt callback.
@@ -124,7 +124,7 @@ extern _voidCallback *internalHIntCB;
  * You should use it only for very low level process and if you don't care about SGDK facilities.<br>
  * In all others cases you would use the SYS_setExtIntCallback() method.
  */
-extern _voidCallback *internalExtIntCB;
+extern VoidCallback *internalExtIntCB;
 
 
 /**
@@ -234,10 +234,10 @@ void SYS_enableInts();
  * the Vertical Interrupt happened and before any internals SGDK V-Int processes.<br>
  * This is useful when you really need to do something right at the beginning of the V-Blank area.
  *
- * \see SYS_setVIntCallback(_voidCallback *CB);
- * \see SYS_setHIntCallback(_voidCallback *CB);
+ * \see SYS_setVIntCallback(VoidCallback *CB);
+ * \see SYS_setHIntCallback(VoidCallback *CB);
  */
-void SYS_setVIntPreCallback(_voidCallback *CB);
+void SYS_setVIntPreCallback(VoidCallback *CB);
 /**
  *  \brief
  *      Set 'Vertical Interrupt' callback method.
@@ -252,10 +252,10 @@ void SYS_setVIntPreCallback(_voidCallback *CB);
  * not right at the start of the V-Blank area.<br>
  * For that you can use the SYS_setPreVIntCallback(..) method instead.
  *
- * \see SYS_setHIntCallback(_voidCallback *CB);
- * \see SYS_setVIntPreCallback(_voidCallback *CB);
+ * \see SYS_setHIntCallback(VoidCallback *CB);
+ * \see SYS_setVIntPreCallback(VoidCallback *CB);
  */
-void SYS_setVIntCallback(_voidCallback *CB);
+void SYS_setVIntCallback(VoidCallback *CB);
 /**
  *  \brief
  *      Set 'Horizontal Interrupt' callback method.
@@ -267,7 +267,7 @@ void SYS_setVIntCallback(_voidCallback *CB);
  * Horizontal interrupt happen at the end of scanline display period right before Horizontal blank.<br>
  * This period is usually used to do mid frame changes (palette, scrolling or others raster effect)
  */
-void SYS_setHIntCallback(_voidCallback *CB);
+void SYS_setHIntCallback(VoidCallback *CB);
 /**
  *  \brief
  *      Set External interrupt callback method.
@@ -278,7 +278,7 @@ void SYS_setHIntCallback(_voidCallback *CB);
  *
  * External interrupt happen on Light Gun trigger (HVCounter is locked).
  */
-void SYS_setExtIntCallback(_voidCallback *CB);
+void SYS_setExtIntCallback(VoidCallback *CB);
 
 /**
  *  \brief
@@ -311,6 +311,26 @@ u16 SYS_isInInterrupt();
 
 /**
  *  \brief
+ *      Set V-Interrupt VBlank alignment state (default state is TRUE).
+ *
+ *  This method allows to force the V-Interrupt to be aligned on VBlank period.<br>
+ *  It means that if the V-Int happen too late (after start of VBlank) then we force a passive wait for the next VBlank so we can align
+ *  start of V-Int processing with beggining of VBlank period (to ensure fast DMA transfert and avoid possible graphical glitches due to VRAM update during active display).<br>
+ *  When a V-Int is delayed to next VBlank then we increase the number of missed frames.
+
+ * \see SYS_getMissedFrames()
+ */
+void SYS_setVIntAligned(bool value);
+/**
+ *  \brief
+ *      Return != 0 if V-Interrupt are forced to be aligned on VBlank.
+ *
+ * \see SYS_setVIntAligned(bool)
+ */
+u16 SYS_isVIntAligned();
+
+/**
+ *  \brief
  *      Return != 0 if we are on a NTSC system.
  *
  * Better to use the IS_PALSYSTEM
@@ -323,6 +343,69 @@ u16 SYS_isNTSC();
  * Better to use the IS_PALSYSTEM
  */
 u16 SYS_isPAL();
+
+/**
+ *  \brief
+ *      Returns number of Frame Per Second.
+ *
+ * This function actually returns the number of time it was called in the last second.<br>
+ * i.e: for benchmarking you should call this method only once per frame update.
+ */
+u32 SYS_getFPS();
+/**
+ *  \brief
+ *      Returns number of Frame Per Second (fix32 form).
+ *
+ * This function actually returns the number of time it was called in the last second.<br>
+ * i.e: for benchmarking you should call this method only once per frame update.
+ */
+fix32 SYS_getFPSAsFloat();
+/**
+ *  \brief
+ *      Return an estimation of CPU load (in %)
+ *
+ * Return an estimation of CPU load (in %, mean value computed on 8 frames) based of idle time spent in #VDP_waitVSync() / #VDP_waitVInt() methods.<br>
+ * This method don't return accurate result when you have missed frames (V-Int missed).
+ *
+ * \see SYS_getMissedFrames()
+ * \see VDP_waitVSync()
+ * \see VDP_waitVInt()
+ */
+u16 SYS_getCPULoad();
+/**
+ *  \brief
+ *      Show a cursor indicating current frame load level in scanline (top = 0% load, bottom = 100% load)
+ *
+ *  Show current frame load using a cursor indicating the scanline reached when #VDP_waitVSync() / #VDP_waitVInt() method was called.<br>
+ *  Note that internally sprite 0 is used to display to cursor (palette 0 and color 15) as it is not directly used by the Sprite Engine but
+ *  if you're using the low level VDP sprite methods then you should know that sprite 0 will be used here.
+ *
+ * \see SYS_hideFrameLoad()
+ */
+void SYS_showFrameLoad();
+/**
+ *  \brief
+ *      Hide the frame load cursor previously enabled using #SYS_showFrameLoad() method.
+
+ * \see SYS_showFrameLoad()
+ */
+void SYS_hideFrameLoad();
+/**
+ *  \brief
+ *      Return the number of missed frames (a missed frame mean that a VInt was missed)
+ *
+ * \see SYS_setVIntAligned(bool)
+ * \see SYS_isVIntAligned()
+ * \see SYS_resetMissedFrames()
+ */
+u32 SYS_getMissedFrames();
+/**
+ *  \brief
+ *      Reset the number of missed frames
+ *
+ * \see SYS_getMissedFrames()
+ */
+void SYS_resetMissedFrames();
 
 /**
  *  \brief

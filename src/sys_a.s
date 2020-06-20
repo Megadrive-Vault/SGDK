@@ -14,8 +14,7 @@ SYS_reset:
 
     move   #0x2700,%sr
     move.l (0),%a7
-    move.l (4),%a0
-    jmp    (%a0)
+    jmp     _reset_entry
 
 
     .align  2
@@ -25,7 +24,7 @@ SYS_hardReset:
 
     move   #0x2700,%sr
     move.l (0),%a7
-    jmp    _hard_reset
+    jmp    _start_entry
 
 
     .align  2
@@ -46,6 +45,7 @@ SYS_setInterruptMaskLevel:
 
     move.w  6(%sp),%d0                      | d0 = value
     andi.w  #0x07,%d0
+    move.w  %d0,intLevelSave                | overwrite intLevelSave so we do not lost new interrupt mask
     ori.w   #0x20,%d0
     lsl.w   #8,%d0
     move.w  %d0,%sr

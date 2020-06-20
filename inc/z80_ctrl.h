@@ -157,36 +157,19 @@
 #define Z80_DRIVER_4PCM_ENV             Z80_DRIVER_4PCM
 /**
  *  \brief
- *      MVS tracker Z80 driver (updated to last version with PCM and PSG support).
- */
-#define Z80_DRIVER_MVS                  5
-/**
- *  \brief
- *      TFM tracker Z80 driver.
- */
-#define Z80_DRIVER_TFM                  6
-/**
- *  \brief
- *      VGM Z80 driver.<br>
- *      It supports 1 PCM channel at a fixed 8 Khz and allows to play SFX through the named PCM channel.<br>
- *      Written by Sigflup and kubilus1.
- */
-#define Z80_DRIVER_VGM                  7
-/**
- *  \brief
  *      eXtended VGM music player driver.<br>
  *      This driver takes VGM (or XGM) file as input to play music.<br>
  *      It supports 4 PCM channels at a fixed 14 Khz and allows to play SFX through PCM with 16 level of priority.<br>
  *      The driver is designed to avoid DMA contention when possible (depending CPU load).
  */
-#define Z80_DRIVER_XGM                  8
+#define Z80_DRIVER_XGM                  5
 /**
  *  \brief
  *      CUSTOM Z80 driver.
  */
 #define Z80_DRIVER_CUSTOM               -1
 
-#define Z80_DRIVER_DEFAULT              Z80_DRIVER_PCM
+#define Z80_DRIVER_DEFAULT              Z80_DRIVER_XGM
 
 
 /**
@@ -269,7 +252,7 @@ void Z80_write(const u16 addr, const u8 value);
  *  \param resetz80
  *      Reset Z80 if set to TRUE.
  */
-void Z80_clear(const u16 dest, const u16 size, const u16 resetz80);
+void Z80_clear(const u16 dest, const u16 size, const bool resetz80);
 /**
  *  \brief
  *      Upload data in Z80 memory.
@@ -282,7 +265,7 @@ void Z80_clear(const u16 dest, const u16 size, const u16 resetz80);
  *  \param resetz80
  *      Reset Z80 if set to TRUE.
  */
-void Z80_upload(const u16 dest, const u8 *data, const u16 size, const u16 resetz80);
+void Z80_upload(const u16 dest, const u8 *data, const u16 size, const bool resetz80);
 /**
  *  \brief
  *      Read data from Z80 memory.
@@ -305,9 +288,6 @@ void Z80_download(const u16 from, u8 *dest, const u16 size);
  *  - #Z80_DRIVER_PCM<br>
  *  - #Z80_DRIVER_2ADPCM<br>
  *  - #Z80_DRIVER_4PCM<br>
- *  - #Z80_DRIVER_MVS<br>
- *  - #Z80_DRIVER_TFM<br>
- *  - #Z80_DRIVER_VGM<br>
  *  - #Z80_DRIVER_XGM<br>
  *  - #Z80_DRIVER_CUSTOM<br>
  */
@@ -327,14 +307,11 @@ void Z80_unloadDriver();
  *      - #Z80_DRIVER_PCM<br>
  *      - #Z80_DRIVER_2ADPCM<br>
  *      - #Z80_DRIVER_4PCM<br>
- *      - #Z80_DRIVER_MVS<br>
- *      - #Z80_DRIVER_TFM<br>
- *      - #Z80_DRIVER_VGM<br>
  *      - #Z80_DRIVER_XGM<br>
  *  \param waitReady
  *      Wait for driver to be ready.
  */
-void Z80_loadDriver(const u16 driver, const u16 waitReady);
+void Z80_loadDriver(const u16 driver, const bool waitReady);
 /**
  *  \brief
  *      Load a custom Z80 driver.

@@ -4,15 +4,17 @@
  *  \author Stephane Dallongeville
  *  \date 08/2011
  *
- * This unit provides general VDP methods :<br>
+ * This unit provides general VDP (Video Display Processor) methods:<br>
  * - initialisation<br>
  * - get / set register<br>
  * - get / set resolution<br>
  * - enable / disable VDP features<br>
  * <br>
- * VRAM should always be organized in a way that tile data are always located before map in VRAM:<br>
+ * <b>WARNING:</b> It's very important that VRAM is organized with tile data being located before tilemaps and tables:<br>
  * 0000-XXXX = tile data<br>
- * XXXX-FFFF = maps & tables (H scroll table, sprite table, B/A plan and window plan).
+ * XXXX-FFFF = tilemaps & tables (H scroll table, sprite table, B/A plane and window plane).<br>
+ * <br>
+ * If you don't respect that you may get in troubles as SGDK expect it ;)
  */
 
 #ifndef _VDP_H_
@@ -87,20 +89,36 @@
 #define VDP_PALMODE_FLAG        (1 << 0)
 
 /**
+ *  \deprecated
+ *      Use VDP_BG_A instead
+ */
+#define VDP_PLAN_A              VDP_BG_A
+/**
+ *  \deprecated
+ *      Use VDP_BG_B instead
+ */
+#define VDP_PLAN_B              VDP_BG_B
+/**
+ *  \deprecated
+ *      Use VDP_WINDOW instead
+ */
+#define VDP_PLAN_WINDOW         VDP_WINDOW
+
+/**
  *  \brief
  *      VDP background A tilemap address in VRAM.
  */
-#define VDP_PLAN_A              aplan_addr
+#define VDP_BG_A                bga_addr
 /**
  *  \brief
  *      VDP background B tilemap address in VRAM.
  */
-#define VDP_PLAN_B              bplan_addr
+#define VDP_BG_B                bgb_addr
 /**
  *  \brief
  *      VDP window tilemap address in VRAM.
  */
-#define VDP_PLAN_WINDOW         window_addr
+#define VDP_WINDOW              window_addr
 /**
  *  \brief
  *      VDP horizontal scroll table address in VRAM.
@@ -113,13 +131,13 @@
 #define VDP_SPRITE_TABLE        slist_addr
 /**
  *  \brief
- *      Address in VRAM where maps start (= address of first map / table in VRAM).
+ *      Address in VRAM where tilemaps start (= address of first tilemap / table in VRAM).
  */
 #define VDP_MAPS_START          maps_addr
 
 /**
  *  \brief
- *      Definition to set horizontal scroll to mode plan.
+ *      Definition to set horizontal scroll to mode plane.
  */
 #define HSCROLL_PLANE           0
 /**
@@ -135,14 +153,19 @@
 
 /**
  *  \brief
- *      Definition to set vertical scroll to mode plan.
+ *      Definition to set vertical scroll to mode plane.
  */
 #define VSCROLL_PLANE           0
 /**
  *  \brief
- *      Definition to set vertical scroll to mode 2 tile.
+ *      Definition to set vertical scroll to mode column (2 tiles width).
  */
-#define VSCROLL_2TILE           1
+#define VSCROLL_COLUMN          1
+/**
+ *  \deprecated
+ *      Use VSCROLL_COLUMN instead
+ */
+#define VSCROLL_2TILE           VSCROLL_COLUMN
 
 /**
  *  \brief
@@ -165,7 +188,7 @@
 
 /**
  *  \brief
- *      SGDL font length
+ *      SGDK font length
  */
 #define FONT_LEN    96
 
@@ -178,7 +201,7 @@
 
 /**
  *  \brief
- *      Space in byte for tile in VRAM (tile space ends where maps starts)
+ *      Space in byte for tile in VRAM (tile space ends where tilemaps starts)
  */
 #define TILE_SPACE              VDP_MAPS_START
 
@@ -218,18 +241,23 @@
 #define TILE_FONTINDEX          (TILE_MAXNUM - FONT_LEN)
 /**
  *  \brief
+ *      Sprite engine base tile index (equal TILE_FONTINDEX if Sprite Engine is not initialized).
+ */
+#define TILE_SPRITEINDEX        (TILE_FONTINDEX - spriteVramSize)
+/**
+ *  \brief
  *      Number of available user tile.
  */
-#define TILE_USERLENGTH         (TILE_FONTINDEX - TILE_USERINDEX)
+#define TILE_USERLENGTH         ((userTileMaxIndex - TILE_USERINDEX) + 1)
 /**
  *  \deprecated Use TILE_USERLENGTH instead.
  */
 #define TILE_USERLENGHT         TILE_USERLENGTH
 /**
  *  \brief
- *      Maximum tile index in VRAM for user.
+ *      Maximum tile index in VRAM reserved for user (for background and user managed sprites)
  */
-#define TILE_USERMAXINDEX       (TILE_USERINDEX + TILE_USERLENGTH - 1)
+#define TILE_USERMAXINDEX       userTileMaxIndex
 /**
  *  \brief
  *      System tile address in VRAM.
@@ -271,55 +299,55 @@
  *  \brief
  *      Set VDP command to read specified VRAM address.
  */
-#define GFX_READ_VRAM_ADDR(adr)     ((0x0000 + ((adr) & 0x3FFF)) << 16) + (((adr) >> 14) | 0x00)
+#define GFX_READ_VRAM_ADDR(adr)     (((0x0000 + ((adr) & 0x3FFF)) << 16) + (((adr) >> 14) | 0x00))
 /**
  *  \brief
  *      Set VDP command to read specified CRAM address.
  */
-#define GFX_READ_CRAM_ADDR(adr)     ((0x0000 + ((adr) & 0x3FFF)) << 16) + (((adr) >> 14) | 0x20)
+#define GFX_READ_CRAM_ADDR(adr)     (((0x0000 + ((adr) & 0x7F)) << 16) + 0x20)
 /**
  *  \brief
  *      Set VDP command to read specified VSRAM address.
  */
-#define GFX_READ_VSRAM_ADDR(adr)    ((0x0000 + ((adr) & 0x3FFF)) << 16) + (((adr) >> 14) | 0x10)
+#define GFX_READ_VSRAM_ADDR(adr)    (((0x0000 + ((adr) & 0x3F)) << 16) + 0x10)
 
 /**
  *  \brief
  *      Set VDP command to write at specified VRAM address.
  */
-#define GFX_WRITE_VRAM_ADDR(adr)    ((0x4000 + ((adr) & 0x3FFF)) << 16) + (((adr) >> 14) | 0x00)
+#define GFX_WRITE_VRAM_ADDR(adr)    (((0x4000 + ((adr) & 0x3FFF)) << 16) + (((adr) >> 14) | 0x00))
 /**
  *  \brief
  *      Set VDP command to write at specified CRAM address.
  */
-#define GFX_WRITE_CRAM_ADDR(adr)    ((0xC000 + ((adr) & 0x3FFF)) << 16) + (((adr) >> 14) | 0x00)
+#define GFX_WRITE_CRAM_ADDR(adr)    (((0xC000 + ((adr) & 0x7F)) << 16) + 0x00)
 /**
  *  \brief
  *      Set VDP command to write at specified VSRAM address.
  */
-#define GFX_WRITE_VSRAM_ADDR(adr)   ((0x4000 + ((adr) & 0x3FFF)) << 16) + (((adr) >> 14) | 0x10)
+#define GFX_WRITE_VSRAM_ADDR(adr)   (((0x4000 + ((adr) & 0x3F)) << 16) + 0x10)
 
 /**
  *  \brief
  *      Set VDP command to issue a DMA transfert to specified VRAM address.
  */
-#define GFX_DMA_VRAM_ADDR(adr)      ((0x4000 + ((adr) & 0x3FFF)) << 16) + (((adr) >> 14) | 0x80)
+#define GFX_DMA_VRAM_ADDR(adr)      (((0x4000 + ((adr) & 0x3FFF)) << 16) + (((adr) >> 14) | 0x80))
 /**
  *  \brief
  *      Set VDP command to issue a DMA transfert to specified CRAM address.
  */
-#define GFX_DMA_CRAM_ADDR(adr)      ((0xC000 + ((adr) & 0x3FFF)) << 16) + (((adr) >> 14) | 0x80)
+#define GFX_DMA_CRAM_ADDR(adr)      (((0xC000 + ((adr) & 0x7F)) << 16) + 0x80)
 /**
  *  \brief
  *      Set VDP command to issue a DMA transfert to specified VSRAM address.
  */
-#define GFX_DMA_VSRAM_ADDR(adr)     ((0x4000 + ((adr) & 0x3FFF)) << 16) + (((adr) >> 14) | 0x90)
+#define GFX_DMA_VSRAM_ADDR(adr)     (((0x4000 + ((adr) & 0x3F)) << 16) + 0x90)
 
 /**
  *  \brief
  *      Set VDP command to issue a DMA VRAM copy to specified VRAM address.
  */
-#define GFX_DMA_VRAMCOPY_ADDR(adr)  ((0x4000 + ((adr) & 0x3FFF)) << 16) + (((adr) >> 14) | 0xC0)
+#define GFX_DMA_VRAMCOPY_ADDR(adr)  (((0x4000 + ((adr) & 0x3FFF)) << 16) + (((adr) >> 14) | 0xC0))
 
 /**
  *  \brief
@@ -361,29 +389,23 @@
 
 
 /**
- * Internal use
- */
-#define CONST_PLAN_A                0
-#define CONST_PLAN_B                1
-#define CONST_PLAN_WINDOW           2
-
-/**
  *  \brief
- *      Type used to define on which plan to work (used by some methods).
+ *      Type used to define on which plane to work (used by some methods).
  */
-typedef struct
+typedef enum
 {
-    u16 value;
-} VDPPlan;
+    BG_A = 0, BG_B = 1, WINDOW = 2
+} VDPPlane;
 
 
 // used by define
 extern u16 window_addr;
-extern u16 aplan_addr;
-extern u16 bplan_addr;
+extern u16 bga_addr;
+extern u16 bgb_addr;
 extern u16 hscrl_addr;
 extern u16 slist_addr;
 extern u16 maps_addr;
+extern u16 userTileMaxIndex;
 
 /**
  *  \brief
@@ -397,18 +419,18 @@ extern u16 screenWidth;
 extern u16 screenHeight;
 /**
  *  \brief
- *      Current background plan width (in tile)
+ *      Current background plane width (in tile)
  *
  *  Possible values are: 32, 64, 128
  */
-extern u16 planWidth;
+extern u16 planeWidth;
 /**
  *  \brief
- *      Current background plan height (in tile)
+ *      Current background plane height (in tile)
  *
  *  Possible values are: 32, 64, 128
  */
-extern u16 planHeight;
+extern u16 planeHeight;
 /**
  *  \brief
  *      Current window width (in tile)
@@ -418,18 +440,18 @@ extern u16 planHeight;
 extern u16 windowWidth;
 /**
  *  \brief
- *      Current background plan width bit shift
+ *      Current background plane width bit shift
  *
- *  Possible values are: 5, 6 or 7 (corresponding to plan width 32, 64 and 128)
+ *  Possible values are: 5, 6 or 7 (corresponding to plane width 32, 64 and 128)
  */
-extern u16 planWidthSft;
+extern u16 planeWidthSft;
 /**
  *  \brief
- *      Current background plan height bit shift
+ *      Current background plane height bit shift
  *
- *  Possible values are: 5, 6 or 7 (corresponding to plan height 32, 64 and 128)
+ *  Possible values are: 5, 6 or 7 (corresponding to plane height 32, 64 and 128)
  */
-extern u16 planHeightSft;
+extern u16 planeHeightSft;
 /**
  *  \brief
  *      Current window width bit shift
@@ -441,28 +463,19 @@ extern u16 windowWidthSft;
 
 /**
  *  \brief
- *      Constante to represent VDP background A plan (used by some methods)
- */
-extern const VDPPlan PLAN_A;
-/**
- *  \brief
- *      Constante to represent VDP background B plan (used by some methods)
- */
-extern const VDPPlan PLAN_B;
-/**
- *  \brief
- *      Constante to represent VDP window plan (used by some methods)
- */
-extern const VDPPlan PLAN_WINDOW;
-
-
-/**
- *  \brief
  *      Initialize the VDP sub system.
  *
  * Reset VDP registers, clear VRAM, set defaults grey, red, green & blue palette.
  */
 void VDP_init();
+
+/**
+ *  \brief
+ *      Reset background plane and palette.
+ *
+ *  Clear background plans, reset palette to grey / red / green / blue and reset scrolls.
+ */
+void VDP_resetScreen();
 
 /**
  *  \brief
@@ -545,16 +558,19 @@ void VDP_setScreenWidth256();
 void VDP_setScreenWidth320();
 
 /**
- *  \deprecated Use the <i>planWidth</i> variable directly.
+ *  \brief
+ *      Return background plane width (in tile).
  */
-u16  VDP_getPlanWidth();
-/**
- *  \deprecated Use the <i>planHeight</i> variable directly.
- */
-u16  VDP_getPlanHeight();
+u16  VDP_getPlaneWidth();
 /**
  *  \brief
- *      Set background plan size (in tile).
+ *      Return background plane height (in tile).
+ */
+u16  VDP_getPlaneHeight();
+/**
+ *  \brief
+ *      Set background plane size (in tile).<br>
+ *      WARNING: take attention to properly setup VRAM so tilemaps has enough space.
  *
  *  \param w
  *      width in tile.<br>
@@ -562,12 +578,21 @@ u16  VDP_getPlanHeight();
  *  \param h
  *      height in tile.<br>
  *      Possible values are 32, 64 or 128.
+ *  \param setupVram
+ *      If set to TRUE then tilemaps and tables will be automatically remapped in VRAM depending
+ *      the plane size.<br>
+ *      If you don't know what that means then it's better to keep this value to TRUE :p
+ */
+void VDP_setPlaneSize(u16 w, u16 h, bool setupVram);
+/**
+ *  \deprecated
+ *      Use #VDP_setPlaneSize(..) instead.
  */
 void VDP_setPlanSize(u16 w, u16 h);
 
 /**
  *  \brief
- *      Returns plan horizontal scrolling mode.
+ *      Returns plane horizontal scrolling mode.
  *
  *  Possible values are: HSCROLL_PLANE, HSCROLL_TILE, HSCROLL_LINE
  *
@@ -576,7 +601,7 @@ void VDP_setPlanSize(u16 w, u16 h);
 u8 VDP_getHorizontalScrollingMode();
 /**
  *  \brief
- *      Returns plan vertical scrolling mode.
+ *      Returns plane vertical scrolling mode.
  *
  *  Possible values are: VSCROLL_PLANE, VSCROLL_2TILE
  *
@@ -585,16 +610,16 @@ u8 VDP_getHorizontalScrollingMode();
 u8 VDP_getVerticalScrollingMode();
 /**
  *  \brief
- *      Set plan scrolling mode.
+ *      Set plane scrolling mode.
  *
  *  \param hscroll
  *      Horizontal scrolling mode :<br>
- *      <b>HSCROLL_PLANE</b> = Scroll offset is applied to the whole plan.<br>
+ *      <b>HSCROLL_PLANE</b> = Scroll offset is applied to the whole plane.<br>
  *      <b>HSCROLL_TILE</b> = Scroll offset is applied on a tile basis granularity (8 pixels bloc).<br>
  *      <b>HSCROLL_LINE</b> = Scroll offset is applied on a line basis granularity (1 pixel).<br>
  *  \param vscroll
  *      Vertical scrolling mode :<br>
- *      <b>VSCROLL_PLANE</b> = Scroll offset is applied to the whole plan.<br>
+ *      <b>VSCROLL_PLANE</b> = Scroll offset is applied to the whole plane.<br>
  *      <b>VSCROLL_2TILE</b> = Scroll offset is applied on 2 tiles basis granularity (16 pixels bloc).<br>
  *
  *  \see VDP_setHorizontalScroll() to set horizontal scroll offset in mode plane.<br>
@@ -604,7 +629,6 @@ u8 VDP_getVerticalScrollingMode();
  *  \see VDP_setVerticalScrollTile() to set vertical scroll offset(s) in mode 2-tile.<br>
  */
 void VDP_setScrollingMode(u16 hscroll, u16 vscroll);
-
 
 /**
  *  \brief
@@ -628,6 +652,30 @@ u8   VDP_getAutoInc();
  */
 void VDP_setAutoInc(u8 value);
 
+/**
+ *  \brief
+ *      Returns DMA enabled state
+ */
+u8 VDP_getDMAEnabled();
+/**
+ *  \brief
+ *      Set DMA enabled state.
+ *
+ *  Note that by default SGDK always enable DMA (there is no reason to disable it)
+ */
+void VDP_setDMAEnabled(u8 value);
+/**
+ *  \brief
+ *      Returns HV counter latching on INT2 (used for light gun)
+ */
+u8 VDP_getHVLatching();
+/**
+ *  \brief
+ *      Set HV counter latching on INT2 (used for light gun)
+ *
+ *  You can ask the HV Counter to fix its value on INT2 for accurate light gun positionning.
+ */
+void VDP_setHVLatching(u8 value);
 /**
  *  \brief
  *      Enable or Disable Horizontal interrupt.
@@ -657,12 +705,22 @@ void VDP_setHIntCounter(u8 value);
 
 /**
  *  \brief
- *      Get VRAM address (location) of Plan A tilemap.
+ *      Get VRAM address (location) of BG A tilemap.
+ */
+u16 VDP_getBGAAddress();
+/**
+ *  \brief
+ *      Get VRAM address (location) of BG B tilemap.
+ */
+u16 VDP_getBGBAddress();
+/**
+ *  \deprecated
+ *      Use #VDP_getBGAAddress(..) instead.
  */
 u16 VDP_getAPlanAddress();
 /**
- *  \brief
- *      Get VRAM address (location) of Plan B tilemap.
+ *  \deprecated
+ *      Use #VDP_getBGBAddress(..) instead.
  */
 u16 VDP_getBPlanAddress();
 /**
@@ -688,14 +746,34 @@ u16 VDP_getHScrollTableAddress();
 
 /**
  *  \brief
- *      Set VRAM address (location) of Plan A tilemap.
+ *      Set VRAM address (location) of BG A tilemap.
  *      The address should be at multiple of $2000<br>
  *      <br>
  *      Ex:<br>
- *      VDP_setAPlanAddress(0xC000)<br>
- *      Will set the Plan A to at address 0xC000 in VRAM.
+ *      VDP_setBGAAddress(0xC000)<br>
+ *      Will set the BG A to at address 0xC000 in VRAM.
+ */
+void VDP_setBGAAddress(u16 value);
+/**
+ *  \brief
+ *      Set VRAM address (location) of BG B tilemap.<br>
+ *      The address should be at multiple of $2000<br>
+ *      <br>
+ *      Ex:<br>
+ *      VDP_setBGBAddress(0xE000)<br>
+ *      Will set the BG B tilemap at address 0xE000 in VRAM.
+ */
+void VDP_setBGBAddress(u16 value);
+/**
+ *  \deprecated
+ *      Use #VDP_setWindowAddress(..) instead.
  */
 void VDP_setAPlanAddress(u16 value);
+/**
+ *  \deprecated
+ *      Use #VDP_setWindowAddress(..) instead.
+ */
+void VDP_setBPlanAddress(u16 value);
 /**
  *  \brief
  *      Set VRAM address (location) of Window tilemap.<br>
@@ -711,16 +789,6 @@ void VDP_setWindowAddress(u16 value);
  *      Use #VDP_setWindowAddress(..) instead.
  */
 void VDP_setWindowPlanAddress(u16 value);
-/**
- *  \brief
- *      Set VRAM address (location) of Plan B tilemap.<br>
- *      The address should be at multiple of $2000<br>
- *      <br>
- *      Ex:<br>
- *      VDP_setBPlanAddress(0xE000)<br>
- *      Will set the Plan B tilemap at address 0xE000 in VRAM.
- */
-void VDP_setBPlanAddress(u16 value);
 /**
  *  \brief
  *      Set VRAM address (location) of Sprite list.<br>
@@ -798,26 +866,60 @@ void VDP_waitFIFOEmpty();
  *  The method actually wait for the next start of Vertical blanking.
  */
 void VDP_waitVSync();
+/**
+ *  \brief
+ *      Wait for next Vertical Interruption.
+ *
+ *  The method actually wait for the next start of Vertical Interruption.
+ *  It returns immediately if we are already in VInt handler.
+ */
+void VDP_waitVInt();
+/**
+ *  \brief
+ *      Wait for next vertical blank period (same as #VDP_waitVSync())
+ *
+ *  The method actually wait for the next start of Vertical blanking.
+ */
+void VDP_waitVBlank();
+/**
+ *  \brief
+ *      Wait for next vertical active area (end of vertical blank period)
+ *
+ *  The method actually wait for the next start of Vertical active area.
+ */
+void VDP_waitVActive();
 
 /**
  *  \brief
- *      Reset background plan and palette.
+ *      Return an enhanced V Counter representation.
  *
- *  Clear background plans, reset palette to grey / red / green / blue and reset scrolls.
+ *  Using direct V counter from VDP may give troubles as the VDP V-Counter rollback during V-Blank period.<br>
+ *  This function aim to make ease the use of V-Counter by adjusting it to a [0-255] range where 0 is the start of VBlank area and 255 the end of active display area.
  */
-void VDP_resetScreen();
+u16 VDP_getAdjustedVCounter();
 
 /**
  *  \brief
  *      Display number of Frame Per Second.
  *
- *  \param float_display
- *      Display as float number.
+ *  \param asFloat
+ *      Display in float number format.
  *
  * This function actually display the number of time it was called in the last second.<br>
  * i.e: for benchmarking you should call this method only once per frame update.
+ *
+ * \see #getFPS(..)
  */
-void VDP_showFPS(u16 float_display);
+void VDP_showFPS(u16 asFloat);
+/**
+ *  \brief
+ *      Display the estimated CPU load (in %).
+ *
+ * This function actually display an estimation of the CPU load (in %) for the last frame.
+ *
+ * \see #SYS_getCPULoad()
+ */
+void VDP_showCPULoad();
 
 
 #endif // _VDP_H_

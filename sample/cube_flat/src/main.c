@@ -41,13 +41,16 @@ int main()
     VDP_setHInterrupt(0);
     VDP_setHilightShadow(0);
 
+    // reduce DMA buffer size to avoid running out of memory (we don't need it)
+    DMA_setBufferSize(2048);
+
     // speed up controller checking
     JOY_setSupport(PORT_1, JOY_SUPPORT_6BTN);
     JOY_setSupport(PORT_2, JOY_SUPPORT_OFF);
 
     JOY_setEventHandler(handleJoyEvent);
 
-    BMP_init(TRUE, PLAN_A, PAL0, FALSE);
+    BMP_init(TRUE, BG_A, PAL0, FALSE);
 
     camdist = FIX16(15);
 
@@ -156,7 +159,7 @@ void drawPoints(u8 col)
             l.pt1 = pts_2D[*line_ind++];
             l.pt2 = pts_2D[*line_ind++];
 
-            BMP_drawLine(&l);
+            if (BMP_clipLine(&l)) BMP_drawLine(&l);
         }
     }
 }

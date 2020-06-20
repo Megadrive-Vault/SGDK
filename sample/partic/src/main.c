@@ -38,7 +38,10 @@ int main()
     VDP_setHInterrupt(0);
     VDP_setHilightShadow(0);
 
-    BMP_init(TRUE, PLAN_A, PAL0, FALSE);
+    // reduce DMA buffer size to avoid running out of memory (we don't need it)
+    DMA_setBufferSize(2048);
+
+    BMP_init(TRUE, BG_A, PAL0, FALSE);
 
     paused = 0;
     col = 0xFF;
@@ -53,7 +56,7 @@ int main()
     /* Do main job here */
     while(1)
     {
-        char str[8];
+        char str[16];
 
         handleInput();
 
@@ -74,7 +77,7 @@ int main()
             BMP_drawText(str, 1, 3);
 
             // display gravity
-            fix16ToStr(gravity, str, 2);
+            fix16ToStr(gravity, str, 3);
             BMP_clearText(1, 4, 5);
             BMP_drawText(str, 1, 4);
 

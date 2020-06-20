@@ -73,6 +73,13 @@
 
 
 /**
+ *  \typedef bool
+ *      boolean type, to be used with TRUE and FALSE constant.
+ *      (internally set as unsigned short)
+ */
+typedef unsigned short bool;
+
+/**
  *  \typedef s8
  *      8 bits signed integer (equivalent to char).
  */
@@ -153,7 +160,7 @@ typedef volatile u32 vu32;
 
 /**
  *  \typedef fix16
- *      16 bits fixed floting point type.
+ *      16 bits fixed floating point type.
  */
 typedef s16 fix16;
 /**
@@ -162,12 +169,23 @@ typedef s16 fix16;
  */
 typedef s32 fix32;
 
+/**
+ *  \typedef f16
+ *      16 bits fixed floating point type (short version).
+ */
+typedef s16 f16;
+/**
+ *  \typedef f32
+ *      32 bits fixed floating point type (short version).
+ */
+typedef s32 f32;
+
 
 #define FASTCALL
 
 /**
  *  \brief
- *      Simple Box structure (can be used for collision detection)
+ *      Simple Box structure
  *
  *  \param x
  *      X position (left)
@@ -188,7 +206,7 @@ typedef struct
 
 /**
  *  \brief
- *      Simple Circle structure (can be used for collision detection)
+ *      Simple Circle structure
  *
  *  \param x
  *      X center position
@@ -205,12 +223,73 @@ typedef struct
 } Circle;
 
 
-typedef void _voidCallback();
+typedef void VoidCallback();
 
 
 u8  getZeroU8();
 u16 getZeroU16();
 u32 getZeroU32();
+
+/**
+ *  \brief
+ *      ROL instruction for byte (8 bit) value
+ *
+ *  \param value
+ *      value to apply bit rotation
+ *  \param number
+ *      number of bit rotation
+ */
+u8  rol8(u8 value, u16 number);
+/**
+ *  \brief
+ *      ROL instruction for short (16 bit) value
+ *
+ *  \param value
+ *      value to apply bit rotation
+ *  \param number
+ *      number of bit rotation
+ */
+u16 rol16(u16 value, u16 number);
+/**
+ *  \brief
+ *      ROL instruction for long (32 bit) value
+ *
+ *  \param value
+ *      value to apply bit rotation
+ *  \param number
+ *      number of bit rotation
+ */
+u32 rol32(u32 value, u16 number);
+/**
+ *  \brief
+ *      ROR instruction for byte (8 bit) value
+ *
+ *  \param value
+ *      value to apply bit rotation
+ *  \param number
+ *      number of bit rotation
+ */
+u8  ror8(u8 value, u16 number);
+/**
+ *  \brief
+ *      ROR instruction for short (16 bit) value
+ *
+ *  \param value
+ *      value to apply bit rotation
+ *  \param number
+ *      number of bit rotation
+ */
+u16 ror16(u16 value, u16 number);
+/**
+ *  \brief
+ *      ROR instruction for long (32 bit) value
+ *
+ *  \param value
+ *      value to apply bit rotation
+ *  \param number
+ *      number of bit rotation
+ */
+u32 ror32(u32 value, u16 number);
 
 
 #endif // _TYPES_H_

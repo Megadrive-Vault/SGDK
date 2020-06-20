@@ -5,18 +5,23 @@
  *  \date 10/2013
  *
  * Sprite engine providing advanced sprites manipulation and operations.<br>
- * This unit use both the tile cache engine (see tilecache.h file for more info)<br>
+ * This unit use both the vram memory manager (see vram.h file for more info)<br>
  * and the Sega Genesis VDP sprite capabilities (see vdp_spr.h file for more info).
  */
 
 #ifndef _SPRITE_ENG_H_
 #define _SPRITE_ENG_H_
 
-#include "vdp_pal.h"
 #include "vdp_tile.h"
 #include "vdp_spr.h"
+#include "pal.h"
 
 
+/**
+ *  \brief
+ *      No collision type
+ */
+#define COLLISION_TYPE_NONE     0
 /**
  *  \brief
  *      Bouding box collision type (Box structure)
@@ -28,52 +33,60 @@
  */
 #define COLLISION_TYPE_CIRCLE   2
 
-
+/**
+ *  \brief
+ *      Special flag to indicate that we want to add the sprite at position 0 (head) in the list<br>
+ *      instead of adding it in last position (default)
+ */
+#define SPR_FLAG_INSERT_HEAD                    0x4000
+/**
+ *  \brief
+ *      Disable delaying of frame update when we are running out of DMA capacity.<br>
+ *      By default we delay the frame update when DMA is already full so the frame update happen as soon we have enough DMA capacity to do it.
+ *      This flag forces frame update to always happen immediately but that may cause graphical glitches.
+ */
+#define SPR_FLAG_DISABLE_DELAYED_FRAME_UPDATE   0x2000
 /**
  *  \brief
  *      Enable automatic visibility calculation
  */
-#define SPR_FLAG_AUTO_VISIBILITY        0x2000
+#define SPR_FLAG_AUTO_VISIBILITY                0x1000
 /**
  *  \brief
  *      Enable fast visibility calculation (only meaningful if SPR_FLAG_AUTO_VISIBILITY is used)
  */
-#define SPR_FLAG_FAST_AUTO_VISIBILITY   0x1000
+#define SPR_FLAG_FAST_AUTO_VISIBILITY           0x0800
 /**
  *  \brief
  *      Enable automatic VRAM allocation
  */
-#define SPR_FLAG_AUTO_VRAM_ALLOC        0x0800
+#define SPR_FLAG_AUTO_VRAM_ALLOC                0x0400
 /**
  *  \brief
  *      Enable automatic hardware sprite allocation
  */
-#define SPR_FLAG_AUTO_SPRITE_ALLOC      0x0400
+#define SPR_FLAG_AUTO_SPRITE_ALLOC              0x0200
 /**
  *  \brief
  *      Enable automatic upload of sprite tiles data into VRAM
  */
-#define SPR_FLAG_AUTO_TILE_UPLOAD       0x0200
+#define SPR_FLAG_AUTO_TILE_UPLOAD               0x0100
 /**
  *  \brief
- *      Enable automatic depth (Z) sorting
+ *      Mask for sprite flag
  */
-#define SPR_FLAG_AUTO_DEPTH_SORTING     0x0100
+#define SPR_FLAG_MASK                           (SPR_FLAG_DISABLE_DELAYED_FRAME_UPDATE | SPR_FLAG_AUTO_VISIBILITY | SPR_FLAG_FAST_AUTO_VISIBILITY | SPR_FLAG_AUTO_VRAM_ALLOC | SPR_FLAG_AUTO_SPRITE_ALLOC | SPR_FLAG_AUTO_TILE_UPLOAD)
+
 /**
  *  \brief
- *      Same as #SPR_FLAG_AUTO_DEPTHSORTING
+ *      Minimum depth for a sprite (always above others sprites)
  */
-#define SPR_FLAG_AUTO_ZSORTING          SPR_FLAG_AUTO_DEPTH_SORTING
-/**
- *  \deprecated
- *      Use #SPR_FLAG_AUTO_DEPTH_SORTING instead
- */
-#define SPR_FLAG_AUTO_YSORTING          SPR_FLAG_AUTO_DEPTH_SORTING
+#define SPR_MIN_DEPTH       (-0x8000)
 /**
  *  \brief
- *      Mask for sprite flags
+ *      Maximum depth for a sprite (always below others sprites)
  */
-#define SPR_FLAGS_MASK                  (SPR_FLAG_AUTO_VISIBILITY | SPR_FLAG_FAST_AUTO_VISIBILITY | SPR_FLAG_AUTO_VRAM_ALLOC | SPR_FLAG_AUTO_SPRITE_ALLOC | SPR_FLAG_AUTO_TILE_UPLOAD | SPR_FLAG_AUTO_DEPTH_SORTING)
+#define SPR_MAX_DEPTH       0x7FFF
 
 /**
  *  \brief
@@ -87,71 +100,117 @@ typedef enum
     AUTO_SLOW,      /**< Automatic visibility calculation SLOW (computation made per hardware sprite) */
 } SpriteVisibility;
 
+
+/**
+ *  \brief
+ *      Simple Box structure for collision
+ *
+ *  \param x
+ *      X position (left)
+ *  \param y
+ *      Y position (top)
+ *  \param w
+ *      width
+ *  \param h
+ *      heigth
+ */
+typedef struct
+{
+    s8 x;
+    s8 y;
+    u8 w;
+    u8 h;
+} BoxCollision;
+
+/**
+ *  \brief
+ *      Simple Circle structure (can be used for collision detection)
+ *
+ *  \param x
+ *      X center position
+ *  \param y
+ *      Y center position
+ *  \param ray
+ *      circle ray
+ */
+typedef struct
+{
+    s8 x;
+    s8 y;
+    u16 ray;
+} CircleCollision;
+
 /**
  *  \struct Collision
  *  \brief
  *      Collision definition union.
  *
- *  \param type
- *      Collision type:<br>
+ *  \param typeHit
+ *      Collision type for hit collision:<br>
+ *      Allowed values are #COLLISION_TYPE_BOX or #COLLISION_TYPE_CIRCLE.
+ *  \param typeAttack
+ *      Collision type for attack collision (can be used as alternative hit collision):<br>
  *      Allowed values are #COLLISION_TYPE_BOX or #COLLISION_TYPE_CIRCLE.
  *  \param box
- *      Box definition if type = #COLLISION_TYPE_BOX
+ *      BoxCollision definition if type = #COLLISION_TYPE_BOX
  *  \param circle
- *      Circle definition if type = #COLLISION_TYPE_CIRCLE
+ *      CircleCollision definition if type = #COLLISION_TYPE_CIRCLE
  *  \param inner
- *      if current collision is verified the we test inner for more precise collisions if needed
+ *      if current collision is verified then we test inner for more precise collision if needed
  *  \param next
  *      if current collision is not verified then we test next for next collision if needed
  */
 typedef struct _collision
 {
-    u16 type;
+    u8 typeHit;
+    u8 typeAttack;
     union
     {
-        Box box;
-        Circle circle;
-    } norm;
+        BoxCollision box;
+        CircleCollision circle;
+    } hit;
     union
     {
-        Box box;
-        Circle circle;
-    } hflip;
-    union
-    {
-        Box box;
-        Circle circle;
-    } vflip;
-    union
-    {
-        Box box;
-        Circle circle;
-    } hvflip;
-    void* inner;
-    void* next;
+        BoxCollision box;
+        CircleCollision circle;
+    } attack;
 } Collision;
 
 /**
  *  \brief
- *      VDP sprite info structure for sprite resource definition.
+ *      Single VDP sprite info structure for sprite animation frame.
  *
- *  \param y
- *      Y offset for this VDP sprite relative to global Sprite position plus 0x80 (0x80 = 0 = no offset)
- *  \param size
- *      sprite size (see SPRITE_SIZE macro)
  *  \param numTile
  *      number of tile for this VDP sprite (should be coherent with the given size field)
- *  \param x
- *      X offset for this VDP sprite relative to global Sprite position plus 0x80 (0x80 = 0 = no offset)
+ *  \param offsetY
+ *      Y offset for this VDP sprite relative to global Sprite position
+ *  \param size
+ *      sprite size (see SPRITE_SIZE macro)
+ *  \param offsetX
+ *      X offset for this VDP sprite relative to global Sprite position
  */
 typedef struct
 {
-    s16 y;          // respect VDP sprite field order
-    u16 size;
-    s16 x;
-    u16 numTile;
-}  VDPSpriteInf;
+    u8 numTile;
+    s8 offsetY;          // respect VDP sprite field order
+    u8 size;
+    s8 offsetX;
+}  FrameVDPSprite;
 
+/**
+ *  \brief
+ *      Frame information structure (used to store frame info for base, H-Flip, V-Flip and HV-Flip version of animation frame)
+ *
+ *  \param frameSprites
+ *      pointer to an array of VDP sprites info composing the frame
+ *  \param collision
+ *      collision structure
+ */
+typedef struct
+{
+    FrameVDPSprite** frameVDPSprites;
+    Collision* collision;
+} FrameInfo;
 
 /**
  *  \brief
@@ -159,10 +218,8 @@ typedef struct
  *
  *  \param numSprite
  *      number of VDP sprite which compose this frame
- *  \param vdpSpritesInf
- *      pointer to an array of VDP sprites info composing the frame (followed by H/V/HV flipped versions)
- *  \param collision
- *      collision structure
+ *  \param frameInfos
+ *      frame information for [base, hflip, vflip, hvflip] version of the sprite
  *  \param tileset
  *      tileset containing tiles for this animation frame (ordered for sprite)
  *  \param w
@@ -174,13 +231,12 @@ typedef struct
  */
 typedef struct
 {
-    u16 numSprite;
-    VDPSpriteInf **vdpSpritesInf;
-    Collision *collision;
-    TileSet *tileset;
-    s16 w;
-    s16 h;
-    u16 timer;
+    u8 numSprite;               // we use u8 to not waste ROM space
+    u8 w;
+    u8 h;
+    u8 timer;
+    FrameInfo frameInfos[4];
+    TileSet* tileset;           // TODO: have a tileset per VDP sprite (when rescomp will be optimized for better LZ4W compression)
 } AnimationFrame;
 
 /**
@@ -201,9 +257,9 @@ typedef struct
 typedef struct
 {
     u16 numFrame;
-    AnimationFrame **frames;
+    AnimationFrame** frames;
     u16 length;
-    u8 *sequence;
+    u8* sequence;
     s16 loop;
 } Animation;
 
@@ -226,9 +282,9 @@ typedef struct
  */
 typedef struct
 {
-    Palette *palette;
+    Palette* palette;
     u16 numAnimation;
-    Animation **animations;
+    Animation** animations;
     u16 maxNumTile;
     u16 maxNumSprite;
 } SpriteDefinition;
@@ -284,61 +340,74 @@ typedef struct _Sprite
 {
     u16 status;
     u16 visibility;
-    const SpriteDefinition *definition;
-    Animation *animation;
-    AnimationFrame *frame;
+    const SpriteDefinition* definition;
+    void (*onFrameChange)(struct _Sprite* sprite);
+    Animation* animation;
+    AnimationFrame* frame;
+    FrameInfo* frameInfo;
     s16 animInd;
     s16 frameInd;
     s16 seqInd;
     u16 timer;
     s16 x;
     s16 y;
-    u16 depth;
+    s16 depth;
     u16 attribut;
     u16 VDPSpriteIndex;
-    u16 frameNumSprite;
-    VDPSprite *lastVDPSprite;
+    VDPSprite* lastVDPSprite;
+    u16 lastNumSprite;
+    u16 spriteToHide;
     u32 data;
-    struct _Sprite *prev;
-    struct _Sprite *next;
+    struct _Sprite* prev;
+    struct _Sprite* next;
 } Sprite;
 
-
 /**
  *  \brief
- *      Callback for the sprite sorting method SPR_sort(..)
+ *      Sprite frame change event callback.<br>
  *
- * This callback is used to compare 2 sprite objects.<br>
- * Return value should be:<br>
- * negatif if s1 is before s2<br>
- * 0 if s1 is equal to s2<br>
- * positif if s1 is after s2
+ *  \param sprite
+ *      The sprite for which frame just changed.
+ *
+ *      This event occurs onframe change process during #SPR_update() call (CAUTION: sprite->status field is not up to date at this point).<br>
+ *      It let opportunity to the developer to apply special behavior or process when sprite frame just changed:<br>
+ *      for instance we can disable animation looping by setting sprite->timer to 0 when we meet the last animation frame.
  */
-typedef s16 _spriteComparatorCallback(Sprite* s1, Sprite* s2);
+typedef void FrameChangeCallback(Sprite* sprite);
 
+/**
+ * Allocated VRAM (in tile) for Sprite Engine
+ */
+extern u16 spriteVramSize;
 
 /**
  *  \brief
- *      Init the Sprite engine with specified VRAM allocation and unpacking buffer size.
+ *      Initialize the Sprite engine with default parameters.
  *
- *  \param maxSprite
- *      Maximum number of sprite the Sprite Engine can handle, higher value requires more memory (maximum accepted = <i>127</i>).<br>
- *      If set to 0 the default value is used (40 sprites)
+ *      Initialize the sprite engine using default parameters:<br>
+ *      512 tiles reserved in VRAM and 320 tiles in memory for the decompression buffer.<br>
+ *      This also initialize the hardware sprite allocation system.
+ *
+ *  \see SPR_initEx()
+ *  \see SPR_end()
+ */
+void SPR_init();
+/**
+ *  \brief
+ *      Init the Sprite engine with specified advanced parameters (VRAM allocation size and decompression buffer size).
+ *
  *  \param vramSize
  *      size (in tile) of the VRAM region for the automatic VRAM tile allocation.<br>
- *      If set to 0 the default size is used (384 tiles)
- *  \param unpackBufferSize
- *      size of the buffer for unpacking sprite tilesets.<br>
- *      the buffer should be big enough to contains all unpacked tileset ready to be send to VRAM.<br>
- *      If set to 0 the default size is used (256 tiles)
+ *      If set to 0 the default size is used (512 tiles)
  *
  *      Initialize the sprite engine.<br>
  *      This allocates a VRAM region for sprite tiles, memory for tileset unpacking and initialize
  *      hardware sprite allocation system.
  *
+ *  \see SPR_init()
  *  \see SPR_end()
  */
-void SPR_init(u16 maxSprite, u16 vramSize, u16 unpackBufferSize);
+void SPR_initEx(u16 vramSize);
 /**
  *  \brief
  *      End the Sprite engine.
@@ -351,7 +420,7 @@ void SPR_end();
  *  \brief
  *      FALSE if sprite cache engine is not initialized, TRUE otherwise.
  */
-u16 SPR_isInitialized();
+bool SPR_isInitialized();
 
 /**
  *  \brief
@@ -363,7 +432,7 @@ void SPR_reset();
 
 /**
  *  \brief
- *      Adds a new sprite and returns it.
+ *      Adds a new sprite with specified parameters and returns it.
  *
  *  \param spriteDef
  *      the SpriteDefinition data to assign to this sprite.
@@ -374,10 +443,13 @@ void SPR_reset();
  *  \param attribut
  *      sprite attribut (see TILE_ATTR() macro).
  *  \param spriteIndex
- *      index of the first sprite in the VDP sprite table used to display this Sprite (should be > 0 and < 128).<br>
+ *      index of the first sprite in the VDP sprite table used to display this Sprite (should be in [1..79] range.<br>
  *      IMPORTANT: this value is used only if you use manual VDP Sprite allocation (see the <i>flags</i> parameter).<br>
- *  \param flags
+ *  \param flag
  *      specific settings for this sprite:<br>
+ *      #SPR_FLAG_DISABLE_DELAYED_FRAME_UPDATE = Disable delaying of frame update when we are running out of DMA capacity.<br>
+ *          If you set this flag then sprite frame update always happen immediately but may lead to some graphical glitches (tiles data and sprite table data not synchronized).
+ *          You can use SPR_setDelayedFrameUpdate(..) method to change this setting.<br>
  *      #SPR_FLAG_AUTO_VISIBILITY = Enable automatic sprite visibility calculation (you can also use SPR_setVisibility(..) method).<br>
  *      #SPR_FLAG_FAST_AUTO_VISIBILITY = Enable fast computation for the automatic visibility calculation (disabled by default)<br>
  *          If you set this flag the automatic visibility calculation will be done globally for the (meta) sprite and not per internal
@@ -388,23 +460,26 @@ void SPR_reset();
  *      #SPR_FLAG_AUTO_SPRITE_ALLOC = Enable automatic hardware/VDP sprite allocation (enabled by default)<br>
  *          If you don't set this flag you will have to manually define the hardware sprite table index to reserve with the <i>spriteIndex</i> parameter or by using the #SPR_setSpriteTableIndex(..) method<br>
  *      #SPR_FLAG_AUTO_TILE_UPLOAD = Enable automatic upload of sprite tiles data into VRAM (enabled by default)<br>
- *          If you don't set this flag you will have to manually upload tiles data of sprite into the VRAM.<br>
- *      #SPR_FLAG_AUTO_YSORTING = Enable automatic Y sorting for this sprite so it will always appear in front of sprites with lower Y position.<br>
- *          If you don't set this flag you can still use SPR_sortOnY() to do Y sorting on the whole sprite list.<br>
- *      #SPR_FLAG_ALWAYS_ON_TOP = Enable 'always on top' this sprite so it will always appear above others sprites whatever sorting order is.<br>
+ *          If you don't set this flag you will have to manually upload tiles data of sprite into the VRAM (you can change this setting using #SPR_setAutoTileUpload(..) method).<br>
+ *      #SPR_FLAG_INSERT_HEAD = Allow to insert the sprite at the start/head of the list.<br>
+ *          When you use this flag the sprite will be inserted at the head of the list making it top most (equivalent to #SPR_setDepth(#SPR_MIN_DEPTH))<br>
+ *          while default insertion position is at the end of the list (equivalent to #SPR_setDepth(#SPR_MAX_DEPTH))<br>
  *      <br>
  *      It's recommended to use the following default settings:<br>
  *      SPR_FLAG_AUTO_VISIBILITY | SPR_FLAG_AUTO_VRAM_ALLOC | SPR_FLAG_AUTO_SPRITE_ALLOC | SPR_FLAG_AUTO_TILE_UPLOAD<br>
  *  \return the new sprite or <i>NULL</i> if the operation failed (some logs can be generated in the KMod console in this case)
  *
- *      By default the sprite uses the provided flags setting for automatic resources allocation and sprite visibility computation.<br>
+ *      By default the sprite uses the provided flag setting for automatic resources allocation and sprite visibility computation.<br>
  *      If auto visibility is not enabled then sprite is considered as not visible by default (see SPR_setVisibility(..) method).<br>
- *      You can release all sprite resources by using SPR_releaseSprite(..) or SPR_reset(..).
+ *      You can release all sprite resources by using SPR_releaseSprite(..) or SPR_reset(..).<br>
+ *      IMPORTANT NOTE: sprite allocation can fail (return NULL) when you are using auto VRAM allocation (SPR_FLAG_AUTO_VRAM_ALLOC) even if there is enough VRAM available,<br>
+ *      this can happen because of the VRAM fragmentation. You can use #SPR_addSpriteExSafe(..) method instead so it take care about VRAM fragmentation.
  *
  *  \see SPR_addSprite(..)
+ *  \see SPR_addSpriteExSafe(..)
  *  \see SPR_releaseSprite(..)
  */
-Sprite* SPR_addSpriteEx(const SpriteDefinition *spriteDef, s16 x, s16 y, u16 attribut, u16 spriteIndex, u16 flags);
+Sprite* SPR_addSpriteEx(const SpriteDefinition* spriteDef, s16 x, s16 y, u16 attribut, u16 spriteIndex, u16 flag);
 /**
  *  \brief
  *      Adds a new sprite with auto resource allocation enabled and returns it.
@@ -421,12 +496,87 @@ Sprite* SPR_addSpriteEx(const SpriteDefinition *spriteDef, s16 x, s16 y, u16 att
  *
  *      By default the sprite uses automatic resources allocation (VRAM and hardware sprite) and visibility is set to ON.<br>
  *      You can change these defaults settings later by calling SPR_setVRAMTileIndex(..), SPR_setSpriteTableIndex(..), SPR_setAutoTileUpload(..) and SPR_setVisibility(..) methods.<br>
+ *      You can release all sprite resources by using SPR_releaseSprite(..) or SPR_reset(..).<br>
+ *      IMPORTANT NOTE: sprite allocation can fail (return NULL) because of automatic VRAM allocation even if there is enough VRAM available,
+ *      this can happen because of the VRAM fragmentation.<br> You can use #SPR_addSpriteSafe(..) method instead so it take care about VRAM fragmentation.
+ *
+ *  \see SPR_addSpriteEx(..)
+ *  \see SPR_addSpriteSafe(..)
+ *  \see SPR_releaseSprite(..)
+ */
+Sprite* SPR_addSprite(const SpriteDefinition* spriteDef, s16 x, s16 y, u16 attribut);
+/**
+ *  \brief
+ *      Adds a new sprite with specified parameters and returns it.
+ *
+ *  \param spriteDef
+ *      the SpriteDefinition data to assign to this sprite.
+ *  \param x
+ *      default X position.
+ *  \param y
+ *      default Y position.
+ *  \param attribut
+ *      sprite attribut (see TILE_ATTR() macro).
+ *  \param spriteIndex
+ *      index of the first sprite in the VDP sprite table used to display this Sprite (should be > 0 and < 128).<br>
+ *      IMPORTANT: this value is used only if you use manual VDP Sprite allocation (see the <i>flag</i> parameter).<br>
+ *  \param flag
+ *      specific settings for this sprite:<br>
+ *      #SPR_FLAG_DISABLE_DELAYED_FRAME_UPDATE = Disable delaying of frame update when we are running out of DMA capacity.<br>
+ *          If you set this flag then sprite frame update always happen immediately but may lead to some graphical glitches (tiles data and sprite table data not synchronized).
+ *          You can use SPR_setDelayedFrameUpdate(..) method to change this setting.<br>
+ *      #SPR_FLAG_AUTO_VISIBILITY = Enable automatic sprite visibility calculation (you can also use SPR_setVisibility(..) method).<br>
+ *      #SPR_FLAG_FAST_AUTO_VISIBILITY = Enable fast computation for the automatic visibility calculation (disabled by default)<br>
+ *          If you set this flag the automatic visibility calculation will be done globally for the (meta) sprite and not per internal
+ *          hardware sprite. This result in faster visibility computation at the expense of some waste of hardware sprite.
+ *          You can set the automatic visibility computation by using SPR_setVisibility(..) method.<br>
+ *      #SPR_FLAG_AUTO_VRAM_ALLOC = Enable automatic VRAM allocation (enabled by default)<br>
+ *          If you don't set this flag you will have to manually define VRAM tile index position for this sprite with the <i>attribut</i> parameter or by using the #SPR_setVRAMTileIndex(..) method<br>
+ *      #SPR_FLAG_AUTO_SPRITE_ALLOC = Enable automatic hardware/VDP sprite allocation (enabled by default)<br>
+ *          If you don't set this flag you will have to manually define the hardware sprite table index to reserve with the <i>spriteIndex</i> parameter or by using the #SPR_setSpriteTableIndex(..) method<br>
+ *      #SPR_FLAG_AUTO_TILE_UPLOAD = Enable automatic upload of sprite tiles data into VRAM (enabled by default)<br>
+ *          If you don't set this flag you will have to manually upload tiles data of sprite into the VRAM (you can change this setting using #SPR_setAutoTileUpload(..) method).<br>
+ *      #SPR_FLAG_INSERT_HEAD = Allow to insert the sprite at the start/head of the list.<br>
+ *          When you use this flag the sprite will be inserted at the head of the list making it top most (equivalent to #SPR_setDepth(#SPR_MIN_DEPTH))<br>
+ *          while default insertion position is at the end of the list (equivalent to #SPR_setDepth(#SPR_MAX_DEPTH))<br>
+ *      <br>
+ *      It's recommended to use the following default settings:<br>
+ *      SPR_FLAG_AUTO_VISIBILITY | SPR_FLAG_AUTO_VRAM_ALLOC | SPR_FLAG_AUTO_SPRITE_ALLOC | SPR_FLAG_AUTO_TILE_UPLOAD<br>
+ *  \return the new sprite or <i>NULL</i> if the operation failed (some logs can be generated in the KMod console in this case)
+ *
+ *      By default the sprite uses the provided flag setting for automatic resources allocation and sprite visibility computation.<br>
+ *      If auto visibility is not enabled then sprite is considered as not visible by default (see SPR_setVisibility(..) method).<br>
  *      You can release all sprite resources by using SPR_releaseSprite(..) or SPR_reset(..).
  *
+ *  \see SPR_addSpriteSafe(..)
  *  \see SPR_addSpriteEx(..)
  *  \see SPR_releaseSprite(..)
  */
-Sprite* SPR_addSprite(const SpriteDefinition *spriteDef, s16 x, s16 y, u16 attribut);
+Sprite* SPR_addSpriteExSafe(const SpriteDefinition* spriteDef, s16 x, s16 y, u16 attribut, u16 spriteIndex, u16 flag);
+/**
+ *  \brief
+ *      Adds a new sprite with auto resource allocation enabled and returns it.
+ *
+ *  \param spriteDef
+ *      the SpriteDefinition data to assign to this sprite.
+ *  \param x
+ *      default X position.
+ *  \param y
+ *      default Y position.
+ *  \param attribut
+ *      sprite attribut (see TILE_ATTR() macro).
+ *  \return the new sprite or <i>NULL</i> if the operation failed (some logs can be generated in the KMod console in this case)
+ *
+ *      By default the sprite uses automatic resources allocation (VRAM and hardware sprite) and visibility is set to ON.<br>
+ *      You can change these defaults settings later by calling SPR_setVRAMTileIndex(..), SPR_setSpriteTableIndex(..), SPR_setAutoTileUpload(..) and SPR_setVisibility(..) methods.<br>
+ *      You can release all sprite resources by using SPR_releaseSprite(..) or SPR_reset(..).<
+ *
+ *  \see SPR_addSpriteSafeEx(..)
+ *  \see SPR_addSprite(..)
+ *  \see SPR_releaseSprite(..)
+ */
+Sprite* SPR_addSpriteSafe(const SpriteDefinition* spriteDef, s16 x, s16 y, u16 attribut);
+
 /**
  *  \brief
  *      Release the specified sprite (no more visible and release its resources).
@@ -441,9 +591,43 @@ Sprite* SPR_addSprite(const SpriteDefinition *spriteDef, s16 x, s16 y, u16 attri
 void SPR_releaseSprite(Sprite* sprite);
 /**
  *  \brief
- *      Returns the number of active sprite (number of sprite added with SPR_addSprite(..) method).
+ *      Returns the number of active sprite (number of sprite added with SPR_addSprite(..) or SPR_addSpriteEx(..) methods).
  */
 u16 SPR_getNumActiveSprite();
+/**
+ *  \brief
+ *      Defragment allocated VRAM for sprites, that can help when sprite allocation fail (SPR_addSprite(..) or SPR_addSpriteEx(..) return <i>NULL</i>).
+ */
+void SPR_defragVRAM();
+/**
+ *  \brief
+ *      Load all frames of SpriteDefinition (using DMA) at specified VRAM tile index and return the indexes table.<br>
+ *      <b>WARNING: This function should be call at init/loading time as it can be quite long (several frames)</b>
+ *
+ *  \param sprDef
+ *      the SpriteDefinition we want to load frame data in VRAM.
+ *  \param index
+ *      the tile position in VRAM where we will upload all sprite frame tiles data.
+ *  \param totalNumTile
+ *      if not NULL then the function will store here the total number of tile used to load all animation frames.
+ *
+ *   Load all frames of spriteDef (using DMA) at specified VRAM tile index and return the indexes table.<br>
+ *   The returned index table is a dynamically allocated 2D table[anim][frame] so you need to release it using #MEM_free(..)
+ *   when you don't need the table anymore.<br>
+ *   You can use the frame change callback (see #SPR_setFrameChangeCallback(..)) to automatically update the VRAM index using the indexes table:<br>
+ *   <code>frameIndexes = SPR_loadAllFrames(sprite->definition, ind);<br>
+ *   SPR_setFrameChangeCallback(sprite, &frameChanged);<br>
+ *   ....<br>
+ *   void frameChanged(Sprite* sprite)<br>
+ *   {<br>
+ *       u16 tileIndex = frameIndexes[sprite->animInd][sprite->frameInd];<br>
+ *       SPR_setVRAMTileIndex(sprite, tileIndex);<br>
+ *   }</code>
+ *
+ *  \return the 2D indexes table or NULL if there is not enough memory to allocate the table.
+ *  \see SPR_setFrameChangeCallback(...);
+ */
+u16** SPR_loadAllFrames(const SpriteDefinition* sprDef, u16 index, u16* totalNumTile);
 
 /**
  *  \brief
@@ -459,7 +643,7 @@ u16 SPR_getNumActiveSprite();
  *
  *  \return FALSE if auto resource allocation failed, TRUE otherwise.
  */
-u16 SPR_setDefinition(Sprite *sprite, const SpriteDefinition *spriteDef);
+bool SPR_setDefinition(Sprite* sprite, const SpriteDefinition* spriteDef);
 /**
  *  \brief
  *      Set sprite position.
@@ -471,7 +655,7 @@ u16 SPR_setDefinition(Sprite *sprite, const SpriteDefinition *spriteDef);
  *  \param y
  *      Y position
  */
-void SPR_setPosition(Sprite *sprite, s16 x, s16 y);
+void SPR_setPosition(Sprite* sprite, s16 x, s16 y);
 /**
  *  \brief
  *      Set sprite Horizontal Flip attribut.
@@ -481,7 +665,7 @@ void SPR_setPosition(Sprite *sprite, s16 x, s16 y);
  *  \param value
  *      The horizontal flip attribut value (TRUE or FALSE)
  */
-void SPR_setHFlip(Sprite *sprite, u16 value);
+void SPR_setHFlip(Sprite* sprite, u16 value);
 /**
  *  \brief
  *      Set sprite Vertical Flip attribut.
@@ -491,7 +675,7 @@ void SPR_setHFlip(Sprite *sprite, u16 value);
  *  \param value
  *      The vertical flip attribut value (TRUE or FALSE)
  */
-void SPR_setVFlip(Sprite *sprite, u16 value);
+void SPR_setVFlip(Sprite* sprite, u16 value);
 /**
  *  \brief
  *      Set sprite Palette index to use.
@@ -501,7 +685,7 @@ void SPR_setVFlip(Sprite *sprite, u16 value);
  *  \param value
  *      The palette index to use for this sprite (PAL0, PAL1, PAL2 or PAL3)
  */
-void SPR_setPalette(Sprite *sprite, u16 value);
+void SPR_setPalette(Sprite* sprite, u16 value);
 /**
  *  \brief
  *      Set sprite Priority attribut.
@@ -511,41 +695,29 @@ void SPR_setPalette(Sprite *sprite, u16 value);
  *  \param value
  *      The priority attribut value (TRUE or FALSE)
  */
-void SPR_setPriorityAttribut(Sprite *sprite, u16 value);
+void SPR_setPriorityAttribut(Sprite* sprite, u16 value);
 /**
  *  \brief
- *      Set sprite depth (for sprite sorting).
+ *      Set sprite depth (for sprite display ordering)
  *
  *  \param sprite
  *      Sprite to set depth for
  *  \param value
- *      The depth value (-1 to set always on top)
+ *      The depth value (SPR_MIN_DEPTH to set always on top)
  *
- *  \see SPR_sort(..)
+ *  Sprite having lower depth are display in front of sprite with higher depth.<br>
+ *  The sprite is *immediately* sorted when its depth value is changed.
  */
-void SPR_setDepth(Sprite *sprite, u16 value);
+void SPR_setDepth(Sprite* sprite, s16 value);
 /**
  *  \brief
  *      Same as #SPR_setDepth(..)
  */
-void SPR_setZ(Sprite *sprite, u16 value);
+void SPR_setZ(Sprite* sprite, s16 value);
 /**
- *  \deprecated Use #SPR_setDepth(..) instead
- *
- *  \brief
- *      Enable/disable 'always on top' state for this sprite so it will always appear above others sprites whatever sorting order is.<br>the automatic Y sorting for this sprite
- *      so it will always appear in front of sprites will lower Y position.
- *
- *  \param sprite
- *      Sprite we want to enable/disable 'always on top' state
- *  \param value
- *      TRUE to enable the 'always on top' state for this sprite<br>
- *      FALSE to disable it
- *
- *  \see SPR_sort(..)
- *  \see SPR_setDepth(..)
-*/
-void SPR_setAlwaysOnTop(Sprite *sprite, u16 value);
+ *  \deprecated Use SPR_setDepth(SPR_MIN_DEPTH) instead
+ */
+void SPR_setAlwaysOnTop(Sprite* sprite, u16 value);
 /**
  *  \brief
  *      Set current sprite animation and frame.
@@ -557,7 +729,7 @@ void SPR_setAlwaysOnTop(Sprite *sprite, u16 value);
  *  \param frame
  *      frame index to set
  */
-void SPR_setAnimAndFrame(Sprite *sprite, s16 anim, s16 frame);
+void SPR_setAnimAndFrame(Sprite* sprite, s16 anim, s16 frame);
 /**
  *  \brief
  *      Set current sprite animation.
@@ -567,7 +739,7 @@ void SPR_setAnimAndFrame(Sprite *sprite, s16 anim, s16 frame);
  *  \param anim
  *      animation index to set.
  */
-void SPR_setAnim(Sprite *sprite, s16 anim);
+void SPR_setAnim(Sprite* sprite, s16 anim);
 /**
  *  \brief
  *      Set current sprite frame.
@@ -577,7 +749,7 @@ void SPR_setAnim(Sprite *sprite, s16 anim);
  *  \param frame
  *      frame index to set.
  */
-void SPR_setFrame(Sprite *sprite, s16 frame);
+void SPR_setFrame(Sprite* sprite, s16 frame);
 /**
  *  \brief
  *      Pass to the next sprite frame.
@@ -585,7 +757,7 @@ void SPR_setFrame(Sprite *sprite, s16 frame);
  *  \param sprite
  *      Sprite to pass to next frame for
  */
-void SPR_nextFrame(Sprite *sprite);
+void SPR_nextFrame(Sprite* sprite);
 
 /**
  *  \brief
@@ -601,7 +773,7 @@ void SPR_nextFrame(Sprite *sprite);
  *  By default the Sprite Engine auto allocate VRAM for sprites tiles but you can force
  *  manual allocation and fix the sprite tiles position in VRAM with this method.
  */
-u16 SPR_setVRAMTileIndex(Sprite *sprite, s16 value);
+bool SPR_setVRAMTileIndex(Sprite* sprite, s16 value);
 /**
  *  \brief
  *      Set the VDP sprite index to use for this sprite.
@@ -619,7 +791,7 @@ u16 SPR_setVRAMTileIndex(Sprite *sprite, s16 value);
  *  index so it can fit the current sprite requirement in VDP sprite.
  *  <b>WARNING: you cannot use sprite 0 as it is internally reserved.</b>
  */
-u16 SPR_setSpriteTableIndex(Sprite *sprite, s16 value);
+bool SPR_setSpriteTableIndex(Sprite* sprite, s16 value);
 /**
  *  \brief
  *      Enable/disable the automatic upload of sprite tiles data into VRAM.
@@ -630,31 +802,37 @@ u16 SPR_setSpriteTableIndex(Sprite *sprite, s16 value);
  *      TRUE to enable the automatic upload of sprite tiles data into VRAM.<br>
  *      FALSE to disable it (mean you have to handle that on your own).<br>
  */
-void SPR_setAutoTileUpload(Sprite *sprite, u16 value);
+void SPR_setAutoTileUpload(Sprite* sprite, bool value);
 /**
  *  \brief
- *      Enable/disable the automatic depth (Z) sorting for this sprite so it will always appear in front of sprites with lower depth position.<br>
- *      Note that you can also use SPR_sort() to do manual depth (Z) sorting on the whole sprite list.
+ *      Enable/disable the delayed frame update.
  *
  *  \param sprite
- *      Sprite we want to enable/disable depth sorting for
+ *      Sprite we want to enable/disable delayed frame update
  *  \param value
- *      TRUE to enable the automatic depth sorting for this sprite<br>
- *      FALSE to disable it, you can still use the SPR_sort(..) method.<br>
+ *      TRUE to enable the delayed frame update when DMA is running out of transfert capacity.<br>
+ *      FALSE to disable it (sprite frame is always updated immediately but that may cause graphical glitches).<br>
  *
- *  \see SPR_sort()
+ *  \see #SPR_FLAG_DISABLE_DELAYED_FRAME_UPDATE
  */
-void SPR_setDepthSorting(Sprite *sprite, u16 value);
+void SPR_setDelayedFrameUpdate(Sprite* sprite, bool value);
 /**
  *  \brief
- *      Same as #SPR_setDepthSorting(..)
+ *      Set the frame change event callback for this sprite.
+ *
+ *  \param sprite
+ *      Sprite we want to set the frame change callback
+ *  \param callback
+ *      the callback (function pointer) to call when we just changed the animation frame for this sprite.
+ *
+ *      The callback (if not NULL) will be called on frame change process during #SPR_update() call (CAUTION: sprite->status field is not up to date at this point).<br>
+ *      It let opportunity to the developer to apply special behavior or process when sprite frame just changed:<br>
+ *      for instance we can disable animation looping by setting sprite->timer to 0 when we meet the last animation frame.
+ *
+ *  \see #FrameChangeCallback
  */
-void SPR_setZSorting(Sprite *sprite, u16 value);
-/**
- *  \deprecated
- *      Use #SPR_setDepthSorting(..) instead
- */
-void SPR_setYSorting(Sprite *sprite, u16 value);
+void SPR_setFrameChangeCallback(Sprite* sprite, FrameChangeCallback* callback);
+
 /**
  *  \brief
  *      Set the <i>visibility</i> state for this sprite.
@@ -668,15 +846,15 @@ void SPR_setYSorting(Sprite *sprite, u16 value);
  *      SpriteVisibility.AUTO_FAST     = visibility is automatically computed from sprite position (global visibility)<br>
  *      SpriteVisibility.AUTO_SLOW     = visibility is automatically computed from sprite position (per hardware sprite visibility)<br>
  */
-void SPR_setVisibility(Sprite *sprite, SpriteVisibility value);
+void SPR_setVisibility(Sprite* sprite, SpriteVisibility value);
 /**
  *  \deprecated Use #SPR_setVisibility(..) method instead.
  */
-void SPR_setAlwaysVisible(Sprite *sprite, u16 value);
+void SPR_setAlwaysVisible(Sprite* sprite, u16 value);
 /**
  *  \deprecated Use #SPR_setVisibility(..) method instead.
  */
-void SPR_setNeverVisible(Sprite *sprite, u16 value);
+void SPR_setNeverVisible(Sprite* sprite, u16 value);
 /**
  *  \brief
  *      Update the internal <i>visibility</i> state for this sprite (when AUTO visibility is enabled).<br>
@@ -691,7 +869,7 @@ void SPR_setNeverVisible(Sprite *sprite, u16 value);
  *
  *  \see SPR_setVisibility(..)
  */
-u16 SPR_computeVisibility(Sprite *sprite);
+bool SPR_computeVisibility(Sprite* sprite);
 
 // /**
 // *  \brief
@@ -704,7 +882,7 @@ u16 SPR_computeVisibility(Sprite *sprite);
 // *  \return
 // *      TRUE if sprite1 and sprite2 are in collision, FALSE otherwise.
 // */
-//u16 SPR_testCollision(Sprite *sprite1, Sprite *sprite2);
+//u16 SPR_testCollision(Sprite* sprite1, Sprite* sprite2);
 
 /**
  *  \brief
@@ -724,38 +902,6 @@ void SPR_clear();
  *  \see #SPR_addSprite(..)
  */
 void SPR_update();
-/**
-\brief
- *      Sort the sprites to define display order.
- *
- *  This method uses the given comparator callback to sort the whole list of Sprite and so define
- *  the display order of the sprites.<br>
- *  If the comparator callback is set to NULL then by default depth sorting is performed.<br>
- *  This method can take a long time, use it carefully !
- *
- *  \param comparator
- *      the comparator callback used to compare sprites.<br>
- *      The comparator is responsible to take care of the ALWAYS_ON_TOP sprite state (using <i>aot</i> sprite field).<br>
- *      It should return a value < 0 if sprite 1 is below sprite 2 and a value > 0 in the opposite case.<br>
- *      If order doesn't matter it can return 0.
- *
- *  \see #SPR_sortOnDepth()
-*/
-void SPR_sort(_spriteComparatorCallback* sorter);
-/**
- *  \brief
- *      Sort the sprites by their depth (Z) to define display order (same as SPR_sort(NULL))
- *
- *  \see #SPR_sort(..)
-*/
-void SPR_sortOnDepth();
-/**
- *  \deprecated
- *      Use #SPR_sortOnDepth() instead
- *
- *  \see #SPR_sort(..)
-*/
-void SPR_sortOnYPos();
 
 /**
  *  \brief
@@ -770,4 +916,3 @@ void SPR_logSprites();
 
 
 #endif // _SPRITE_ENG_H_
-

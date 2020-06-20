@@ -16,10 +16,6 @@
 #include "z80_drv1.h"
 #include "z80_drv2.h"
 #include "z80_drv3.h"
-#include "z80_mvs.h"
-#include "z80_mvsc.h"
-#include "z80_tfm.h"
-#include "z80_vgm.h"
 #include "z80_xgm.h"
 
 #include "tab_vol.h"
@@ -30,7 +26,7 @@
 // we don't want to share it
 extern vu32 VIntProcess;
 
-s16 currentDriver;
+u16 currentDriver;
 u16 driverFlags;
 
 
@@ -124,21 +120,21 @@ void Z80_setBank(const u16 bank)
 
 u8 Z80_read(const u16 addr)
 {
-    return ((u8*) Z80_RAM)[addr];
+    return ((vu8*) Z80_RAM)[addr];
 }
 
 void Z80_write(const u16 addr, const u8 value)
 {
-    ((u8*) Z80_RAM)[addr] = value;
+    ((vu8*) Z80_RAM)[addr] = value;
 }
 
 
-void Z80_clear(const u16 to, const u16 size, const u16 resetz80)
+void Z80_clear(const u16 to, const u16 size, const bool resetz80)
 {
     Z80_requestBus(TRUE);
 
     const u8 zero = getZeroU8();
-    u8* dst = (u8*) (Z80_RAM + to);
+    vu8* dst = (u8*) (Z80_RAM + to);
     u16 len = size;
 
     while(len--) *dst++ = zero;
@@ -150,13 +146,13 @@ void Z80_clear(const u16 to, const u16 size, const u16 resetz80)
     if (resetz80) Z80_endReset();
 }
 
-void Z80_upload(const u16 to, const u8 *from, const u16 size, const u16 resetz80)
+void Z80_upload(const u16 to, const u8 *from, const u16 size, const bool resetz80)
 {
     Z80_requestBus(TRUE);
 
     // copy data to Z80 RAM (need to use byte copy here)
     u8* src = (u8*) from;
-    u8* dst = (u8*) (Z80_RAM + to);
+    vu8* dst = (u8*) (Z80_RAM + to);
     u16 len = size;
 
     while(len--) *dst++ = *src++;
@@ -173,7 +169,7 @@ void Z80_download(const u16 from, u8 *to, const u16 size)
     Z80_requestBus(TRUE);
 
     // copy data from Z80 RAM (need to use byte copy here)
-    u8* src = (u8*) (Z80_RAM + from);
+    vu8* src = (u8*) (Z80_RAM + from);
     u8* dst = (u8*) to;
     u16 len = size;
 
@@ -202,7 +198,7 @@ void Z80_unloadDriver()
     VIntProcess &= ~PROCESS_XGM_TASK;
 }
 
-void Z80_loadDriver(const u16 driver, const u16 waitReady)
+void Z80_loadDriver(const u16 driver, const bool waitReady)
 {
     const u8 *drv;
     u16 len;
@@ -227,21 +223,6 @@ void Z80_loadDriver(const u16 driver, const u16 waitReady)
             len = sizeof(z80_drv3);
             break;
 
-        case Z80_DRIVER_MVS:
-            drv = z80_mvs;
-            len = sizeof(z80_mvs);
-            break;
-
-        case Z80_DRIVER_TFM:
-            drv = z80_tfm;
-            len = sizeof(z80_tfm);
-            break;
-
-        case Z80_DRIVER_VGM:
-            drv = z80_vgm;
-            len = sizeof(z80_vgm);
-            break;
-
         case Z80_DRIVER_XGM:
             drv = z80_xgm;
             len = sizeof(z80_xgm);
@@ -255,12 +236,12 @@ void Z80_loadDriver(const u16 driver, const u16 waitReady)
     // clear z80 memory
     Z80_clear(0, Z80_RAM_LEN, FALSE);
     // upload Z80 driver and reset Z80
-    Z80_upload(0, drv, len, 1);
+    Z80_upload(0, drv, len, TRUE);
 
     // driver initialisation
     switch(driver)
     {
-        u8 *pb;
+        vu8 *pb;
         u32 addr;
 
         case Z80_DRIVER_2ADPCM:
@@ -314,35 +295,6 @@ void Z80_loadDriver(const u16 driver, const u16 waitReady)
             Z80_releaseBus();
             break;
 
-        case Z80_DRIVER_MVS:
-            // put driver in stop state
-            Z80_requestBus(TRUE);
-
-            // point to Z80 FM command
-            pb = (u8 *) MVS_FM_CMD;
-            // stop command for FM
-            *pb++ = MVS_FM_STOP;
-            *pb = MVS_FM_RESET;
-
-            // point to Z80 DACcommand
-            pb = (u8 *) MVS_DAC_CMD;
-            // stop command for DAC
-            *pb = MVS_DAC_STOP;
-
-            // point to Z80 PSG command
-            pb = (u8 *) MVS_PSG_CMD;
-            // stop command for PSG
-            *pb = MVS_PSG_STOP;
-
-            Z80_releaseBus();
-            break;
-
-        case Z80_DRIVER_VGM:
-            // just reset sound chips
-            YM2612_reset();
-            PSG_init();
-            break;
-
         case Z80_DRIVER_XGM:
             // reset sound chips
             YM2612_reset();
@@ -380,15 +332,7 @@ void Z80_loadDriver(const u16 driver, const u16 waitReady)
 
                 // just wait for it
                 while(!Z80_isDriverReady())
-                    while(Z80_isBusTaken());
-                break;
-
-            // others drivers
-            case Z80_DRIVER_TFM:
-            case Z80_DRIVER_MVS:
-            case Z80_DRIVER_VGM:
-                // just wait a bit of time
-                waitMs(100);
+                    waitMs(1);
                 break;
         }
     }
@@ -417,7 +361,7 @@ void Z80_loadCustomDriver(const u8 *drv, u16 size)
     // clear z80 memory
     Z80_clear(0, Z80_RAM_LEN, FALSE);
     // upload Z80 driver and reset Z80
-    Z80_upload(0, drv, size, 1);
+    Z80_upload(0, drv, size, TRUE);
 
     // custom driver set
     currentDriver = Z80_DRIVER_CUSTOM;
@@ -428,7 +372,7 @@ void Z80_loadCustomDriver(const u8 *drv, u16 size)
 
 u16 Z80_isDriverReady()
 {
-    u8 *pb;
+    vu8 *pb;
     u8 ret;
 
     // point to Z80 status

@@ -57,19 +57,13 @@ void setRandomSeed(u16 seed);
 u16 random();
 
 /**
- *  \brief
- *      Returns number of Frame Per Second.
- *
- * This function actually returns the number of time it was called in the last second.<br>
- * i.e: for benchmarking you should call this method only once per frame update.
+ *  \deprecated
+ *      Uses #SYS_getFPS() instead
  */
 u32 getFPS();
 /**
- *  \brief
- *      Returns number of Frame Per Second (fix32 form).
- *
- * This function actually returns the number of time it was called in the last second.<br>
- * i.e: for benchmarking you should call this method only once per frame update.
+ *  \deprecated
+ *      Uses #SYS_getFPSAsFloat() instead
  */
 fix32 getFPS_f();
 
@@ -128,7 +122,7 @@ void KLog_F4x(s16 numDec, char* t1, fix32 v1, char* t2, fix32 v2, char* t3, fix3
 /**
  *  \brief
  *      Allocate a new Bitmap structure which can receive unpacked bitmap data of the specified Bitmap.<br>
- *      If source is not packed the function only allocate space for simple shallow copy of the source.
+ *      There is no memory allocated for the palette data as it assumes to always use a reference for Palette field.
  *
  *  \param bitmap
  *      Source Bitmap we want to allocate the unpacked Bitmap object.
@@ -140,7 +134,8 @@ void KLog_F4x(s16 numDec, char* t1, fix32 v1, char* t2, fix32 v2, char* t3, fix3
 Bitmap *allocateBitmap(const Bitmap *bitmap);
 /**
  *  \brief
- *      Allocate a new Bitmap structure which can receive the bitmap data for the specified Bitmap dimension.
+ *      Allocate a new Bitmap structure which can receive the bitmap data for the specified Bitmap dimension.<br>
+ *      There is no memory allocated for the palette data as it assumes to always use a reference for Palette field.
  *
  *  \param width
  *      Width in pixel of the bitmap structure we want to allocate.
@@ -154,8 +149,7 @@ Bitmap *allocateBitmap(const Bitmap *bitmap);
 Bitmap *allocateBitmapEx(u16 width, u16 heigth);
 /**
  *  \brief
- *      Allocate TileSet structure which can receive unpacked tiles data of the specified TileSet.<br>
- *      If source is not packed the function only allocate space for simple shallow copy of the source.
+ *      Allocate TileSet structure which can receive unpacked tiles data of the specified TileSet.
  *
  *  \param tileset
  *      Source TileSet we want to allocate the unpacked TileSet object.
@@ -163,7 +157,6 @@ Bitmap *allocateBitmapEx(u16 width, u16 heigth);
  *      The new allocated TileSet object which can receive the unpacked TileSet, note that returned tile set
  *      is allocated in a single bloc and can be released with Mem_Free(tb).<br>
  *      <i>NULL</i> is returned if there is not enough memory to store the unpacked tiles.
- *      If the source TileSet is not packed then returned TileSet allocate only memory to do <i>NULL</i> is returned if there is not enough memory to store the unpacked tiles.
  */
 TileSet *allocateTileSet(const TileSet *tileset);
 /**
@@ -180,35 +173,34 @@ TileSet *allocateTileSet(const TileSet *tileset);
 TileSet *allocateTileSetEx(u16 numTile);
 /**
  *  \brief
- *      Allocate Map structure which can receive unpacked map data of the specified Map.<br>
- *      If source is not packed the function only allocate space for simple shallow copy of the source.
+ *      Allocate TileMap structure which can receive unpacked tilemap data of the specified TileMap.
  *
- *  \param map
- *      Source Map we want to allocate the unpacked Map object.
+ *  \param tilemap
+ *      Source TileMap we want to allocate the unpacked TileMap object.
  *  \return
- *      The new allocated Map object which can receive the unpacked Map, note that returned map
- *      is allocated in a single bloc and can be released with Mem_Free(map).<br>
- *      <i>NULL</i> is returned if there is not enough memory to store the unpacked map.
+ *      The new allocated TileMap object which can receive the unpacked TileMap, note that returned tilemap
+ *      is allocated in a single bloc and can be released with Mem_Free(tilemap).<br>
+ *      <i>NULL</i> is returned if there is not enough memory to store the unpacked tilemap.
  */
-Map *allocateMap(const Map *map);
+TileMap *allocateTileMap(const TileMap *tilemap);
 /**
  *  \brief
- *      Allocate a new Map structure which can receive map data for the specified Map dimension.
+ *      Allocate a new TileMap structure which can receive tilemap data for the specified TileMap dimension.
  *
  *  \param width
- *      Width in tile of the Map structure we want to allocate.
+ *      Width in tile of the TileMap structure we want to allocate.
  *  \param heigth
- *      heigth in tile of the Map structure we want to allocate.
+ *      heigth in tile of the TileMap structure we want to allocate.
  *  \return
- *      The new allocated Map object which can receive data for the specified Map dimension.<br>
- *      Note that returned map is allocated in a single bloc and can be released with Mem_Free(map).<br>
- *      <i>NULL</i> is returned if there is not enough memory to allocate the map.
+ *      The new allocated TileMap object which can receive data for the specified TileMap dimension.<br>
+ *      Note that returned tilemap is allocated in a single bloc and can be released with Mem_Free(tilemap).<br>
+ *      <i>NULL</i> is returned if there is not enough memory to allocate the tilemap.
  */
-Map *allocateMapEx(u16 width, u16 heigth);
+TileMap *allocateTileMapEx(u16 width, u16 heigth);
 /**
  *  \brief
  *      Allocate Image structure which can receive unpacked image data of the specified Image.
- *      If source is not packed the function only allocate space for simple shallow copy of the source.
+ *      There is no memory allocated for the palette data as it assumes to always use a reference for Palette field.
  *
  *  \param image
  *      Source Image we want to allocate the unpacked Image object.
@@ -251,19 +243,19 @@ Bitmap *unpackBitmap(const Bitmap *src, Bitmap *dest);
 TileSet *unpackTileSet(const TileSet *src, TileSet *dest);
 /**
  *  \brief
- *      Unpack the specified Map structure and return result in a new allocated Map.
+ *      Unpack the specified TileMap structure and return result in a new allocated TileMap.
  *
  *  \param src
- *      map to unpack.
+ *      tilemap to unpack.
  *  \param dest
- *      Destination map where to store unpacked data, be sure to allocate enough space in tiles and tilemap buffer.<br>
- *      If set to NULL then a dynamic allocated Map is returned.
+ *      Destination tilemap where to store unpacked data, be sure to allocate enough space in tiles and tilemap buffer.<br>
+ *      If set to NULL then a dynamic allocated TileMap is returned.
  *  \return
- *      The unpacked Map.<br>
- *      If <i>dest</i> was set to NULL then the returned map is allocated in a single bloc and can be released with Mem_Free(map).<br>
- *      <i>NULL</i> is returned if there is not enough memory to store the unpacked map.
+ *      The unpacked TileMap.<br>
+ *      If <i>dest</i> was set to NULL then the returned tilemap is allocated in a single bloc and can be released with Mem_Free(tilemap).<br>
+ *      <i>NULL</i> is returned if there is not enough memory to store the unpacked tilemap.
  */
-Map *unpackMap(const Map *src, Map *dest);
+TileMap *unpackTileMap(const TileMap *src, TileMap *dest);
 /**
  *  \brief
  *      Unpack the specified Image structure and return result in a new allocated Image.
@@ -323,25 +315,6 @@ u32 aplib_unpack(u8 *src, u8 *dest);
  *      Unpacked size.
  */
 u32 lz4w_unpack(const u8 *src, u8 *dest);
-
-/**
- *  \brief
- *      Decompresses data in raw deflate/zlib format.<br/>
- *
- *   zlib is a general-purpose compressor, supporting quite good
- *   compression ratios, but unpacking is relatively slow on the
- *   Genesis (around 23kb/s).
- *
- *  \param dest
- *      Destination buffer
- *  \param outLen
- *      Size of the destination buffer in bytes
- *  \param src
- *      Source data buffer containing compressed data
- *  \param srcLen
- *      Size of the source buffer in bytes
- */
-int zlib_unpack(void *dest, const unsigned outLen, const void *src, const unsigned srcLen);
 
 
 /**

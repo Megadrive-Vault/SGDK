@@ -14,6 +14,7 @@
 
 #include "dma.h"
 
+#include "mapper.h"
 #include "memory.h"
 #include "tools.h"
 #include "string.h"
@@ -58,15 +59,15 @@ u8 *bmp_buffer_write;
 static u8 *bmp_buffer_0;
 static u8 *bmp_buffer_1;
 
-VDPPlan bmp_plan;
+VDPPlane bmp_plan;
 u16 *bmp_plan_adr;
 
 // internals
 static u16 flag;
 static u16 pal;
 static u16 prio;
-static u16 state;
-static s16 phase;
+static vu16 state;
+static vs16 phase;
 
 
 // ASM methods
@@ -81,25 +82,25 @@ static u16 doBlit();
 static void drawLine_old(u16 x1, u16 y1, s16 dx, s16 dy, s16 step_x, s16 step_y, u8 col);
 
 
-void BMP_init(u16 double_buffer, VDPPlan plan, u16 palette, u16 priority)
+void BMP_init(u16 double_buffer, VDPPlane plane, u16 palette, u16 priority)
 {
     flag = (double_buffer) ? BMP_FLAG_DOUBLEBUFFER : 0;
-    bmp_plan = plan;
+    bmp_plan = plane;
     pal = palette & 3;
     prio = priority & 1;
 
-    switch(plan.value)
+    switch(plane)
     {
         default:
-        case CONST_PLAN_B:
-            bmp_plan_adr = &bplan_addr;
+        case BG_B:
+            bmp_plan_adr = &bgb_addr;
             break;
 
-        case CONST_PLAN_A:
-            bmp_plan_adr = &aplan_addr;
+        case BG_A:
+            bmp_plan_adr = &bga_addr;
             break;
 
-        case CONST_PLAN_WINDOW:
+        case WINDOW:
             bmp_plan_adr = &window_addr;
             break;
     }
@@ -112,6 +113,10 @@ void BMP_init(u16 double_buffer, VDPPlan plan, u16 palette, u16 priority)
 
 void BMP_end()
 {
+    // better to disable ints here
+    // FIXME: for some reason disabling interrupts generally break BMP init :-/
+//    SYS_disableInts();
+
     // cancel interrupt processing
     HIntProcess &= ~PROCESS_BITMAP_TASK;
     VIntProcess &= ~PROCESS_BITMAP_TASK;
@@ -137,10 +142,21 @@ void BMP_end()
         MEM_free(bmp_buffer_1);
         bmp_buffer_1 = NULL;
     }
+
+    // try to pack memory free blocks (before to avoid memory fragmentation)
+    MEM_pack();
+
+    // we can re enable ints
+    // FIXME: for some reason disabling interrupts generally break BMP init :-/
+//    SYS_enableInts();
 }
 
 void BMP_reset()
 {
+    // better to disable ints here
+    // FIXME: for some reason disabling interrupts generally break BMP init :-/
+//    SYS_disableInts();
+
     // cancel bitmap interrupt processing
     HIntProcess &= ~PROCESS_BITMAP_TASK;
     VIntProcess &= ~PROCESS_BITMAP_TASK;
@@ -158,12 +174,10 @@ void BMP_reset()
     if (!bmp_buffer_1)
         bmp_buffer_1 = MEM_alloc(BMP_PITCH * BMP_HEIGHT * sizeof(u8));
 
-    // need 64x64 cells sized plan
-    VDP_setPlanSize(64, 64);
-
-    // clear plan (complete tilemap)
-    VDP_clearPlan(bmp_plan, TRUE);
-    VDP_waitDMACompletion();
+    // need 64x64 cells sized plane
+    VDP_setPlaneSize(64, 64, TRUE);
+    // clear plane (complete tilemap)
+    VDP_clearPlane(bmp_plan, TRUE);
 
     // reset state and phase
     state = 0;
@@ -196,6 +210,10 @@ void BMP_reset()
     VIntProcess |= PROCESS_BITMAP_TASK;
     VDP_setHInterrupt(1);
 
+    // we can re enable ints
+    // FIXME: for some reason disabling interrupts generally break BMP init :-/
+//    SYS_enableInts();
+
 //    // first init, clear and flip
 //    BMP_clear();
 //    BMP_flip(FALSE);
@@ -220,9 +238,7 @@ u16 BMP_hasFlipRequestPending()
 
 void BMP_waitWhileFlipRequestPending()
 {
-    vu16* pw = &state;
-
-    while (*pw & BMP_STAT_FLIPWAITING);
+    while (BMP_hasFlipRequestPending());
 }
 
 u16 BMP_hasFlipInProgess()
@@ -234,9 +250,7 @@ u16 BMP_hasFlipInProgess()
 
 void BMP_waitFlipComplete()
 {
-    vu16* pw = &state;
-
-    while (*pw & BMP_STAT_FLIPPING);
+    while (BMP_hasFlipInProgess());
 }
 
 
@@ -257,10 +271,17 @@ u16 BMP_flip(u16 async)
         return 1;
     }
 
+    // better to disable ints here
+    // FIXME: for some reason disabling interrupts generally break BMP init :-/
+//    SYS_disableInts();
+
     // flip bitmap buffer
     flipBuffer();
     // flip started (will be processed in blank period --> BMP_doBlankProcess)
     state |= BMP_STAT_FLIPPING;
+
+    // we can re enable ints
+//    SYS_enableInts();
 
     // wait completion
     if (!async) BMP_waitFlipComplete();
@@ -292,12 +313,12 @@ void BMP_showFPS(u16 float_display)
 
     if (float_display)
     {
-        fix32ToStr(getFPS_f(), str, 1);
+        fix32ToStr(SYS_getFPSAsFloat(), str, 1);
         VDP_clearTextBG(bmp_plan, 2, y, 5);
     }
     else
     {
-        uintToStr(getFPS(), str, 1);
+        uintToStr(SYS_getFPS(), str, 1);
         VDP_clearTextBG(bmp_plan, 2, y, 2);
     }
 
@@ -1097,13 +1118,13 @@ u16 BMP_drawBitmap(const Bitmap *bitmap, u16 x, u16 y, u16 loadpal)
         MEM_free(b);
     }
     else
-        BMP_drawBitmapData(bitmap->image, x, y, w, h, w >> 1);
+        BMP_drawBitmapData((u8*) FAR(bitmap->image), x, y, w, h, w >> 1);
 
     // load the palette
     if (loadpal)
     {
         const Palette *palette = bitmap->palette;
-        VDP_setPaletteColors((pal << 4) + (palette->index & 0xF), palette->data, palette->length);
+        PAL_setPaletteColors(pal << 4, palette);
     }
 
     return TRUE;
@@ -1129,13 +1150,13 @@ u16 BMP_drawBitmapScaled(const Bitmap *bitmap, u16 x, u16 y, u16 w, u16 h, u16 l
         MEM_free(b);
     }
     else
-        BMP_scale(bitmap->image, bmp_wb, bmp_h, bmp_wb, BMP_getWritePointer(x, y), w >> 1, h, BMP_PITCH);
+        BMP_scale(FAR(bitmap->image), bmp_wb, bmp_h, bmp_wb, BMP_getWritePointer(x, y), w >> 1, h, BMP_PITCH);
 
     // load the palette
     if (loadpal)
     {
         const Palette *palette = bitmap->palette;
-        VDP_setPaletteColors((pal << 4) + (palette->index & 0xF), palette->data, palette->length);
+        PAL_setPaletteColors(pal << 4, palette);
     }
 
     return TRUE;
@@ -1323,7 +1344,7 @@ static void clearVRAMBuffer(u16 num)
 {
     if (num) DMA_doVRamFill(BMP_FB1TILE, BMP_PITCH * BMP_HEIGHT, 0, 1);
     else DMA_doVRamFill(BMP_FB0TILE, BMP_PITCH * BMP_HEIGHT, 0, 1);
-    DMA_waitCompletion();
+    VDP_waitDMACompletion();
 }
 
 static void flipBuffer()

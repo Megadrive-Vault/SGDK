@@ -10,6 +10,7 @@
 #include "memory.h"
 #include "vram.h"
 #include "tools.h"
+#include "mapper.h"
 
 #include "kdebug.h"
 #include "string.h"
@@ -19,74 +20,78 @@
 //#define SPR_DEBUG
 //#define SPR_PROFIL
 
+#ifdef SPR_DEBUG
+    // force LIB_DEBUG
+    #define LIB_DEBUG   1
+#endif // SPR_DEBUG
+
+
+// first hardware sprite is reserved (used internally for sorting)
+#define MAX_SPRITE                          (80 - 1)
 
 // internals
 #define VISIBILITY_ON                       0xFFFF
 #define VISIBILITY_OFF                      0x0000
 
+#define ALLOCATED                           0x8000
+
 #define NEED_ST_ATTR_UPDATE                 0x0001
 #define NEED_ST_POS_UPDATE                  0x0002
 #define NEED_ST_ALL_UPDATE                  (NEED_ST_ATTR_UPDATE | NEED_ST_POS_UPDATE)
 
-#define NEED_DEPTH_SORTING                  0x0004
-
-#define NEED_ST_VISIBILITY_UPDATE           0x0010
-#define NEED_VISIBILITY_UPDATE              0x0020
-#define NEED_FRAME_UPDATE                   0x0040
-#define NEED_TILES_UPLOAD                   0x0080
+#define NEED_VISIBILITY_UPDATE              0x0010
+#define NEED_FRAME_UPDATE                   0x0020
+#define NEED_TILES_UPLOAD                   0x0040
 
 #define NEED_UPDATE                         0x00FF
 
 
 // shared from vdp_spr.c unit
-extern VDPSprite *lastAllocatedVDPSprite;
+extern void logVDPSprite(u16 index);
+// shared from vdp.c unit
+extern void updateUserTileMaxIndex();
 
 
 // forward
-static Sprite* allocateSprite();
+static Sprite* allocateSprite(u16 head);
 //static Sprite** allocateSprites(Sprite** sprites, u16 num);
-static void releaseSprite(Sprite* sprite);
+static bool releaseSprite(Sprite* sprite);
 //static void releaseSprites(Sprite** sprites, u16 num);
 
-static void setVDPSpriteIndex(Sprite *sprite, u16 ind, u16 num, VDPSprite *last);
-static u16 updateVisibility(Sprite *sprite);
-static u16 setVisibility(Sprite *sprite, u16 visibility);
-static u16 updateFrame(Sprite *sprite);
+static void setVDPSpriteIndex(Sprite* sprite, u16 ind, u16 num);
+static bool updateVisibility(Sprite* sprite, u16 status);
+static u16 setVisibility(Sprite* sprite, u16 visibility);
+static u16 updateFrame(Sprite* sprite, u16 status);
 
-static void updateSpriteTableVisibility(Sprite *sprite);
-static void updateSpriteTableAll(Sprite *sprite);
-static void updateSpriteTablePos(Sprite *sprite);
-static void updateSpriteTableAttr(Sprite *sprite);
-static void loadTiles(Sprite *sprite);
-static Sprite* sortSpriteOnDepth(Sprite* sprite);
-static Sprite* sortSprite(Sprite* sprite, _spriteComparatorCallback* sorter);
+static void updateSpriteTableAll(Sprite* sprite);
+static void updateSpriteTablePos(Sprite* sprite);
+static void updateSpriteTableAttr(Sprite* sprite);
+static void loadTiles(Sprite* sprite);
+static Sprite* sortSprite(Sprite* sprite);
 static void moveAfter(Sprite* pos, Sprite* sprite);
-static u16 getSpriteIndex(Sprite *sprite);
-static void logSprite(Sprite *sprite);
+static u16 getSpriteIndex(Sprite* sprite);
+static void logSprite(Sprite* sprite);
 
 // starter VDP sprite - never visible (used for sprite sorting)
-static VDPSprite *starter;
+static VDPSprite* starter;
 
 // allocated bank of sprites for the Sprite Engine
-static Sprite *spritesBank = NULL;
-// maximum number of sprite (number of allocated sprites for the Sprite Engine)
-static u16 spritesBankSize;
+static Sprite* spritesBank = NULL;
 
 // used for sprite allocation
-static Sprite **allocStack;
+static Sprite** allocStack;
 // point on top of the allocation stack (first available sprite)
-static Sprite **free;
+static Sprite** free;
 
 // pointer on first and last active sprite in the linked list
-Sprite *firstSprite;
-Sprite *lastSprite;
-// number of active sprite
-u16 spriteNum;
+Sprite* firstSprite;
+Sprite* lastSprite;
 
-static u8 *unpackBuffer;
-static u8 *unpackNext;
+// VRAM region allocated for the Sprite Engine
 static VRAMRegion vram;
 
+// size of VRAM allocated for Sprite Engine
+u16 spriteVramSize = 0;
 
 #ifdef SPR_PROFIL
 
@@ -109,47 +114,49 @@ static VRAMRegion vram;
 #define PROFIL_UPDATE_SPRITE_TABLE      16
 #define PROFIL_LOADTILES                17
 #define PROFIL_SORT                     18
+#define PROFIL_VRAM_DEFRAG              19
 
 static u32 profil_time[20];
 #endif
 
 
-void SPR_init(u16 maxSprite, u16 cacheSize, u16 unpackBufferSize)
+void SPR_initEx(u16 vramSize)
 {
-    u16 adjMax;
     u16 index;
     u16 size;
 
     // already initialized --> end it first
     if (SPR_isInitialized()) SPR_end();
 
-    // don't allow more than 128 sprites max
-    adjMax = maxSprite?min(128, maxSprite):40;
-
     // alloc sprites bank
-    spritesBank = MEM_alloc(adjMax * sizeof(Sprite));
-    spritesBankSize = adjMax;
+    spritesBank = MEM_alloc(MAX_SPRITE * sizeof(Sprite));
     // allocation stack
-    allocStack = MEM_alloc(adjMax * sizeof(Sprite*));
-    // alloc sprite tile unpack buffer
-    unpackBuffer = MEM_alloc(((unpackBufferSize?unpackBufferSize:256) * 32) + 1024);
+    allocStack = MEM_alloc(MAX_SPRITE * sizeof(Sprite*));
 
-    size = cacheSize?cacheSize:384;
-    // get start tile index for sprite cache (reserve VRAM area just before system font)
+    size = vramSize?vramSize:420;
+    // get start tile index for sprite data (reserve VRAM area just before system font)
     index = TILE_FONTINDEX - size;
 
     // and create a VRAM region for sprite tile allocation
     VRAM_createRegion(&vram, index, size);
+    // store allocated VRAM size to let SGDK know about it
+    spriteVramSize = size;
 
-#ifdef SPR_DEBUG
-    KLog("Sprite engine initialized");
-    KLog_U1("  maxSprite: ", adjMax);
-    KLog_U1("  unpack buffer size:", (unpackBufferSize?unpackBufferSize:256) * 32);
+    // need to update user tile max index
+    updateUserTileMaxIndex();
+
+#if (LIB_DEBUG != 0)
+    KLog("Sprite engine initialized !");
     KLog_U2_("  VRAM region: [", index, " - ", index + (size - 1), "]");
-#endif // SPR_DEBUG
+#endif // LIB_DEBUG
 
     // reset
     SPR_reset();
+}
+
+void SPR_init()
+{
+    SPR_initEx(420);
 }
 
 void SPR_end()
@@ -158,22 +165,30 @@ void SPR_end()
     {
         // reset and clear VDP sprite
         VDP_resetSprites();
-        VDP_updateSprites(1, TRUE);
+        VDP_updateSprites(1, DMA_QUEUE_COPY);
 
         // release memory
         MEM_free(spritesBank);
         spritesBank = NULL;
-        spritesBankSize = 0;
         MEM_free(allocStack);
         allocStack = NULL;
-        MEM_free(unpackBuffer);
-        unpackBuffer = NULL;
 
         VRAM_releaseRegion(&vram);
+        spriteVramSize = 0;
+
+        // need to update user tile max index
+        updateUserTileMaxIndex();
+
+        // try to pack memory free blocks (before to avoid memory fragmentation)
+        MEM_pack();
     }
+
+#if (LIB_DEBUG != 0)
+    KLog("Sprite engine ended !");
+#endif
 }
 
-u16 SPR_isInitialized()
+bool SPR_isInitialized()
 {
     return (spritesBank != NULL);
 }
@@ -183,21 +198,17 @@ void SPR_reset()
     u16 i;
 
     // release and clear sprites data
-    memset(spritesBank, 0, sizeof(Sprite) * spritesBankSize);
+    memset(spritesBank, 0, sizeof(Sprite) * MAX_SPRITE);
 
     // reset allocation stack
-    for(i = 0; i < spritesBankSize; i++)
+    for(i = 0; i < MAX_SPRITE; i++)
         allocStack[i] = &spritesBank[i];
     // init free position
-    free = &allocStack[spritesBankSize];
+    free = &allocStack[MAX_SPRITE];
 
     // no active sprites
     firstSprite = NULL;
     lastSprite = NULL;
-    // reset current number of active sprite
-    spriteNum = 0;
-    // reset unpack pointer
-    unpackNext = unpackBuffer;
 
     // clear VRAM region
     VRAM_clearRegion(&vram);
@@ -213,67 +224,143 @@ void SPR_reset()
     memset(profil_time, 0, sizeof(profil_time));
 #endif // SPR_PROFIL
 
-#ifdef SPR_DEBUG
+#if (LIB_DEBUG != 0)
     KLog("Sprite engine reset");
     KLog_U1("  VRAM region free: ", VRAM_getFree(&vram));
     KLog_U1("  Available VDP sprites: ", VDP_getAvailableSprites());
-#endif // SPR_DEBUG
+#endif // LIB_DEBUG
 }
 
 
-static Sprite* allocateSprite()
+static Sprite* allocateSprite(u16 head)
 {
+    Sprite* result;
+
     // enough sprite remaining ?
     if (free == allocStack)
     {
 #if (LIB_DEBUG != 0)
-        KLog("Couldn't allocate Sprite, no more available sprite(s) !");
+        KLog("SPR_internalAllocateSprite(): failed - no more available sprite !");
 #endif
 
         return NULL;
     }
 
-#ifdef SPR_DEBUG
-    KLog_U1("allocateSprite: allocating sprite at pos ", free[-1] - spritesBank);
-#endif // SPR_DEBUG
+#if (LIB_DEBUG != 0)
+    KLog_U1("SPR_internalAllocateSprite(): success - allocating sprite at pos ", free[-1] - spritesBank);
+#endif // LIB_DEBUG
 
-    return *--free;
+    // allocate
+    result = *--free;
+
+    if (head)
+    {
+        // add the new sprite at the beginning of the chained list
+        if (firstSprite) firstSprite->prev = result;
+        result->prev = NULL;
+        result->next = firstSprite;
+        // update first and last sprite
+        if (lastSprite == NULL) lastSprite = result;
+        firstSprite = result;
+    }
+    else
+    {
+        // add the new sprite at the end of the chained list
+        if (lastSprite) lastSprite->next = result;
+        result->prev = lastSprite;
+        result->next = NULL;
+        // update first and last sprite
+        if (firstSprite == NULL) firstSprite = result;
+        lastSprite = result;
+    }
+
+    // mark as allocated --> this is done after allocate call, not needed here
+    // result->status = ALLOCATED;
+
+    return result;
 }
 
-static void releaseSprite(Sprite* sprite)
+static bool releaseSprite(Sprite* sprite)
 {
 #ifdef SPR_PROFIL
     s32 prof = getSubTick();
 #endif // SPR_PROFIL
 
-#ifdef SPR_DEBUG
-    KLog_U1("releaseSprites: releasing sprite at pos ", sprite - spritesBank);
-#endif // SPR_DEBUG
+    // really allocated ?
+    if (sprite->status & ALLOCATED)
+    {
+        Sprite* prev;
+        Sprite* next;
+        VDPSprite* lastVDPSprite;
 
-    // release sprite
-    *free++ = sprite;
+#if (LIB_DEBUG != 0)
+        KLog_U1("SPR_internalReleaseSprite: success - released sprite at pos ", sprite - spritesBank);
+#endif // LIB_DEBUG
+
+        // release sprite
+        *free++ = sprite;
+
+        // remove sprite from chained list
+        prev = sprite->prev;
+        next = sprite->next;
+
+        // get the last VDP sprite to link from
+        if (prev)
+        {
+            lastVDPSprite = prev->lastVDPSprite;
+            prev->next = next;
+        }
+        else
+        {
+            lastVDPSprite = starter;
+            // update first sprite
+            firstSprite = next;
+        }
+        // get the next VDP Sprite index to link to
+        if (next)
+        {
+            lastVDPSprite->link = next->VDPSpriteIndex;
+            next->prev = prev;
+        }
+        else
+        {
+            lastVDPSprite->link = 0;
+            // update last sprite
+            lastSprite = prev;
+        }
+
+        // not anymore allocated
+        sprite->status &= ~ALLOCATED;
 
 #ifdef SPR_PROFIL
-    prof = getSubTick() - prof;
-    // rollback correction
-    if (prof < 0) prof = 100;
-    profil_time[PROFIL_RELEASE_SPRITE] += prof;
+        profil_time[PROFIL_RELEASE_SPRITE] += getSubTick() - prof;
 #endif // SPR_PROFIL
+
+        return TRUE;
+    }
+
+#if (LIB_DEBUG != 0)
+    KLog_U1_("SPR_internalReleaseSprite: failed - sprite at pos ", sprite - spritesBank, " is not allocated !");
+#endif // LIB_DEBUG
+
+#ifdef SPR_PROFIL
+    profil_time[PROFIL_RELEASE_SPRITE] += getSubTick() - prof;
+#endif // SPR_PROFIL
+
+    return FALSE;
 }
 
-Sprite* SPR_addSpriteEx(const SpriteDefinition *spriteDef, s16 x, s16 y, u16 attribut, u16 spriteIndex, u16 flags)
+Sprite* SPR_addSpriteEx(const SpriteDefinition* spriteDef, s16 x, s16 y, u16 attribut, u16 spriteIndex, u16 flag)
 {
 #ifdef SPR_PROFIL
     s32 prof = getSubTick();
 #endif // SPR_PROFIL
 
     s16 ind;
-    u16 numVDPSprite;
     Sprite* sprite;
-    VDPSprite* lastVDPSprite;
 
     // allocate new sprite
-    sprite = allocateSprite();
+    sprite = allocateSprite(flag & SPR_FLAG_INSERT_HEAD);
 
     // can't allocate --> return NULL
     if (!sprite)
@@ -285,41 +372,43 @@ Sprite* SPR_addSpriteEx(const SpriteDefinition *spriteDef, s16 x, s16 y, u16 att
         return NULL;
     }
 
-    sprite->status = flags & SPR_FLAGS_MASK;
-
-    // add the new sprite
-    if (lastSprite) lastSprite->next = sprite;
-    sprite->prev = lastSprite;
-    sprite->next = NULL;
-    // update first and last sprite
-    if (firstSprite == NULL) firstSprite = sprite;
-    lastSprite = sprite;
-    // update sprite number
-    spriteNum++;
+    sprite->status = ALLOCATED | (flag & SPR_FLAG_MASK);
 
 #ifdef SPR_DEBUG
     KLog_U2("SPR_addSpriteEx: added sprite #", getSpriteIndex(sprite), " - internal position = ", sprite - spritesBank);
 #endif // SPR_DEBUG
 
     // auto visibility ?
-    if (flags & SPR_FLAG_AUTO_VISIBILITY) sprite->visibility = 0;
+    if (flag & SPR_FLAG_AUTO_VISIBILITY) sprite->visibility = 0;
     // otherwise we set it to visible by default
     else sprite->visibility = VISIBILITY_ON;
-    // initialized with specified flags
+    // initialized with specified flag
     sprite->definition = spriteDef;
+    sprite->onFrameChange = NULL;
+
+//    FIXME: not needed
+//    sprite->animation = NULL;
     sprite->frame = NULL;
+    sprite->frameInfo = NULL;
+
     sprite->animInd = -1;
     sprite->frameInd = -1;
     sprite->seqInd = -1;
+
     sprite->x = x + 0x80;
     sprite->y = y + 0x80;
-    sprite->depth = 0;
-    sprite->frameNumSprite = 0;
+    // depending sprite position (first or last) we set its default depth
+    if (flag & SPR_FLAG_INSERT_HEAD) sprite->depth = SPR_MIN_DEPTH;
+    else sprite->depth = SPR_MAX_DEPTH;
 
-    numVDPSprite = spriteDef->maxNumSprite;
+    const u16 numVDPSprite = spriteDef->maxNumSprite;
+
+    // default on sprite init
+    sprite->lastNumSprite = numVDPSprite;
+    sprite->spriteToHide = 0;
 
     // auto VDP sprite alloc enabled ?
-    if (flags & SPR_FLAG_AUTO_SPRITE_ALLOC)
+    if (flag & SPR_FLAG_AUTO_SPRITE_ALLOC)
     {
         // allocate VDP sprite
         ind = VDP_allocateSprites(numVDPSprite);
@@ -333,31 +422,23 @@ Sprite* SPR_addSpriteEx(const SpriteDefinition *spriteDef, s16 x, s16 y, u16 att
 #ifdef SPR_DEBUG
         KLog_U3("  allocated ", numVDPSprite, " VDP sprite(s) at ", ind, ", remaining VDP sprite = ", VDP_getAvailableSprites());
 #endif // SPR_DEBUG
-
-        // get last VDP sprite pointer
-        lastVDPSprite = lastAllocatedVDPSprite;
     }
-    else
-    {
-        // use given sprite index
-        ind = spriteIndex;
-        // need to compute last VDP sprite pointer
-        lastVDPSprite = NULL;
-    }
+    // use given sprite index
+    else ind = spriteIndex;
 
     // set the VDP Sprite index for this sprite and do attached operation
-    setVDPSpriteIndex(sprite, ind, numVDPSprite, lastVDPSprite);
+    setVDPSpriteIndex(sprite, ind, numVDPSprite);
 
     // auto VRAM alloc enabled ?
-    if (flags & SPR_FLAG_AUTO_VRAM_ALLOC)
+    if (flag & SPR_FLAG_AUTO_VRAM_ALLOC)
     {
         // allocate VRAM
         ind = VRAM_alloc(&vram, spriteDef->maxNumTile);
         // not enough --> release sprite and return NULL
-        if (ind == -1)
+        if (ind < 0)
         {
             // release allocated VDP sprites
-            if (flags & SPR_FLAG_AUTO_SPRITE_ALLOC)
+            if (flag & SPR_FLAG_AUTO_SPRITE_ALLOC)
                 VDP_releaseSprites(sprite->VDPSpriteIndex, numVDPSprite);
 
             releaseSprite(sprite);
@@ -374,72 +455,73 @@ Sprite* SPR_addSpriteEx(const SpriteDefinition *spriteDef, s16 x, s16 y, u16 att
     // just use the given attribut
     else sprite->attribut = attribut;
 
-    // set anim and frame to 0
+    // set anim and frame to 0 (important to do it after sprite->attribut has been set)
     SPR_setAnimAndFrame(sprite, 0, 0);
 
 #ifdef SPR_PROFIL
-    prof = getSubTick() - prof;
-    // rollback correction
-    if (prof < 0) prof = 100;
-    profil_time[PROFIL_ADD_SPRITE] += prof;
+    profil_time[PROFIL_ADD_SPRITE] += getSubTick() - prof;
 #endif // SPR_PROFIL
 
     return sprite;
 }
 
-Sprite* SPR_addSprite(const SpriteDefinition *spriteDef, s16 x, s16 y, u16 attribut)
+Sprite* SPR_addSprite(const SpriteDefinition* spriteDef, s16 x, s16 y, u16 attribut)
 {
     return SPR_addSpriteEx(spriteDef, x, y, attribut, 0,
                             SPR_FLAG_AUTO_VRAM_ALLOC | SPR_FLAG_AUTO_SPRITE_ALLOC | SPR_FLAG_AUTO_TILE_UPLOAD);
 }
 
-void SPR_releaseSprite(Sprite *sprite)
+Sprite* SPR_addSpriteExSafe(const SpriteDefinition* spriteDef, s16 x, s16 y, u16 attribut, u16 spriteIndex, u16 flag)
+{
+    Sprite* result = SPR_addSpriteEx(spriteDef, x, y, attribut, spriteIndex, flag);
+
+    // allocation failed ?
+    if (result == NULL)
+    {
+        // try to defragment VRAM, it can help
+        SPR_defragVRAM();
+        // VRAM is now defragmented, so allocation should pass this time
+        result = SPR_addSpriteEx(spriteDef, x, y, attribut, spriteIndex, flag);
+    }
+
+    return result;
+}
+
+Sprite* SPR_addSpriteSafe(const SpriteDefinition* spriteDef, s16 x, s16 y, u16 attribut)
+{
+    Sprite* result = SPR_addSprite(spriteDef, x, y, attribut);
+
+    // allocation failed ?
+    if (result == NULL)
+    {
+        // try to defragment VRAM, it can help
+        SPR_defragVRAM();
+        // VRAM is now defragmented, so allocation should pass this time
+        result = SPR_addSprite(spriteDef, x, y, attribut);
+    }
+
+    return result;
+}
+
+void SPR_releaseSprite(Sprite* sprite)
 {
 #ifdef SPR_PROFIL
     s32 prof = getSubTick();
 #endif // SPR_PROFIL
 
-    Sprite* prev;
-    Sprite* next;
-    VDPSprite* lastVDPSprite;
-
 #ifdef SPR_DEBUG
     KLog_U2("SPR_releaseSprite: releasing sprite #", getSpriteIndex(sprite), " - internal position = ", sprite - spritesBank);
 #endif // SPR_DEBUG
 
-    // release sprite (no error checking here)
-    releaseSprite(sprite);
+    // release sprite
+    if (!releaseSprite(sprite))
+    {
+#ifdef SPR_PROFIL
+        profil_time[PROFIL_REMOVE_SPRITE] += getSubTick() - prof;
+#endif // SPR_PROFIL
 
-    prev = sprite->prev;
-    next = sprite->next;
-
-    // get the last VDP sprite to link from
-    if (prev)
-    {
-        lastVDPSprite = prev->lastVDPSprite;
-        prev->next = next;
+        return;
     }
-    else
-    {
-        lastVDPSprite = starter;
-        // update first sprite
-        firstSprite = next;
-    }
-    // get the next VDP Sprite index to link to
-    if (next)
-    {
-        lastVDPSprite->link = next->VDPSpriteIndex;
-        next->prev = prev;
-    }
-    else
-    {
-        lastVDPSprite->link = 0;
-        // update last sprite
-        lastSprite = prev;
-    }
-
-    // decrement number of sprite
-    spriteNum--;
 
     u16 status = sprite->status;
 
@@ -463,20 +545,131 @@ void SPR_releaseSprite(Sprite *sprite)
     }
 
 #ifdef SPR_PROFIL
-    prof = getSubTick() - prof;
-    // rollback correction
-    if (prof < 0) prof = 100;
-    profil_time[PROFIL_REMOVE_SPRITE] += prof;
+    profil_time[PROFIL_REMOVE_SPRITE] += getSubTick() - prof;
 #endif // SPR_PROFIL
 }
 
 u16 SPR_getNumActiveSprite()
 {
-    return spriteNum;
+    return &allocStack[MAX_SPRITE] - free;
+}
+
+void SPR_defragVRAM()
+{
+#ifdef SPR_PROFIL
+    s32 prof = getSubTick();
+#endif // SPR_PROFIL
+
+    Sprite* sprite;
+
+    // release all VRAM region
+    VRAM_clearRegion(&vram);
+
+    // iterate over all sprites to re-allocate auto allocated VRAM
+    sprite = firstSprite;
+    while(sprite)
+    {
+        u16 status = sprite->status;
+
+        // sprite is using auto VRAM allocation ?
+        if (status & SPR_FLAG_AUTO_VRAM_ALLOC)
+        {
+            // re-allocate VRAM for this sprite (can't fail here)
+            const u16 ind = VRAM_alloc(&vram, sprite->definition->maxNumTile);
+            const u16 attr = sprite->attribut;
+
+            // VRAM allocation changed ?
+            if ((attr & ~TILE_ATTR_MASK) != ind)
+            {
+                // set VRAM index and preserve previous attributs
+                sprite->attribut = ind | (attr & TILE_ATTR_MASK);
+
+                // need to update attribute VDP sprite table
+                status |= NEED_ST_ATTR_UPDATE;
+                // auto tile upload enabled ? --> need to re upload tile to new location
+                if (status & SPR_FLAG_AUTO_TILE_UPLOAD)
+                    status |= NEED_TILES_UPLOAD;
+
+                sprite->status = status;
+            }
+        }
+
+        // next sprite
+        sprite = sprite->next;
+    }
+
+#ifdef SPR_PROFIL
+    profil_time[PROFIL_VRAM_DEFRAG] += getSubTick() - prof;
+#endif // SPR_PROFIL
+}
+
+u16** SPR_loadAllFrames(const SpriteDefinition* sprDef, u16 index, u16* totalNumTile)
+{
+    u16 numFrameTot = 0;
+    u16 numTileTot = 0;
+    Animation** anim = sprDef->animations;
+    const u16 numAnimation = sprDef->numAnimation;
+
+    for(u16 indAnim = 0; indAnim < numAnimation; indAnim++)
+    {
+        AnimationFrame** frame = (*anim)->frames;
+        const u16 numFrame = (*anim)->numFrame;
+
+        for(u16 indFrame = 0; indFrame < numFrame; indFrame++)
+        {
+            numTileTot += (*frame)->tileset->numTile;
+            frame++;
+        }
+
+        numFrameTot += numFrame;
+        anim++;
+    }
+
+    // store total num tile if needed
+    if (totalNumTile) *totalNumTile = numTileTot;
+
+    // allocate result table indexes[numAnim][numFrame]
+    u16** indexes = MEM_alloc((numAnimation * sizeof(u16*)) + (numFrameTot * sizeof(u16)));
+    // store pointer
+    u16** result = indexes;
+    // init frames indexes pointer
+    u16* indFrames = (u16*) (indexes + numAnimation);
+
+    // start index
+    u16 tileInd = index;
+
+    anim = sprDef->animations;
+
+    for(u16 indAnim = 0; indAnim < numAnimation; indAnim++)
+    {
+        // store frames indexes pointer for this animation
+        *indexes++ = indFrames;
+
+        AnimationFrame** frame = (*anim)->frames;
+        const u16 numFrame = (*anim)->numFrame;
+
+        for(u16 indFrame = 0; indFrame < numFrame; indFrame++)
+        {
+            const TileSet* tileset = (*frame)->tileset;
+
+            // load tileset
+            VDP_loadTileSet(tileset, tileInd, DMA);
+            // store frame tile index
+            *indFrames++ = tileInd;
+            // next tileset
+            tileInd += tileset->numTile;
+            // next frame
+            frame++;
+        }
+
+        anim++;
+    }
+
+    return result;
 }
 
 
-u16 SPR_setDefinition(Sprite *sprite, const SpriteDefinition *spriteDef)
+bool SPR_setDefinition(Sprite* sprite, const SpriteDefinition* spriteDef)
 {
 #ifdef SPR_PROFIL
     s32 prof = getSubTick();
@@ -490,33 +683,40 @@ u16 SPR_setDefinition(Sprite *sprite, const SpriteDefinition *spriteDef)
     if (sprite->definition == spriteDef) return TRUE;
 
     u16 status = sprite->status;
+    const u16 oldNumSprite = sprite->definition->maxNumSprite;
+    const u16 newNumSprite = spriteDef->maxNumSprite;
+
+    // definition changed --> re-init that
+    sprite->lastNumSprite = newNumSprite;
+    sprite->spriteToHide = 0;
 
     // auto VDP sprite alloc enabled --> realloc VDP sprite(s)
-    if ((status & SPR_FLAG_AUTO_SPRITE_ALLOC) && (sprite->definition->maxNumSprite != spriteDef->maxNumSprite))
+    if ((status & SPR_FLAG_AUTO_SPRITE_ALLOC) && (oldNumSprite != newNumSprite))
     {
         // we release previous allocated VDP sprite(s)
-        VDP_releaseSprites(sprite->VDPSpriteIndex, sprite->definition->maxNumSprite);
+        VDP_releaseSprites(sprite->VDPSpriteIndex, oldNumSprite);
 
 #ifdef SPR_DEBUG
-        KLog_U3("  released ", sprite->definition->maxNumSprite, " VDP sprite(s) at ", sprite->VDPSpriteIndex, ", remaining VDP sprite = ", VDP_getAvailableSprites());
+        KLog_U3("  released ", oldNumSprite, " VDP sprite(s) at ", sprite->VDPSpriteIndex, ", remaining VDP sprite = ", VDP_getAvailableSprites());
 #endif // SPR_DEBUG
 
-        const s16 num = spriteDef->maxNumSprite;
         // then we allocate the VDP sprite(s) for the new definition
-        const s16 ind = VDP_allocateSprites(num);
+        const s16 ind = VDP_allocateSprites(newNumSprite);
         // not enough --> return error
         if (ind == -1) return FALSE;
 
         // set the VDP Sprite index for this sprite and do attached operation
-        setVDPSpriteIndex(sprite, ind, num, lastAllocatedVDPSprite);
+        setVDPSpriteIndex(sprite, ind, newNumSprite);
 
 #ifdef SPR_DEBUG
-        KLog_U3("  allocated ", num, " VDP sprite(s) at ", ind, ", remaining VDP sprite = ", VDP_getAvailableSprites());
+        KLog_U3("  allocated ", newNumSprite, " VDP sprite(s) at ", ind, ", remaining VDP sprite = ", VDP_getAvailableSprites());
 #endif // SPR_DEBUG
-
     }
+
+    const u16 newNumTile = spriteDef->maxNumTile;
+
     // auto VRAM alloc enabled --> realloc VRAM tile area
-    if ((status & SPR_FLAG_AUTO_VRAM_ALLOC) && (sprite->definition->maxNumTile != spriteDef->maxNumTile))
+    if ((status & SPR_FLAG_AUTO_VRAM_ALLOC) && (sprite->definition->maxNumTile != newNumTile))
     {
         // we release previous allocated VRAM
         VRAM_free(&vram, sprite->attribut & TILE_INDEX_MASK);
@@ -526,9 +726,9 @@ u16 SPR_setDefinition(Sprite *sprite, const SpriteDefinition *spriteDef)
 #endif // SPR_DEBUG
 
         // allocate VRAM
-        const s16 ind = VRAM_alloc(&vram, spriteDef->maxNumTile);
+        const s16 ind = VRAM_alloc(&vram, newNumTile);
         // not enough --> return error
-        if (ind == -1) return FALSE;
+        if (ind < 0) return FALSE;
 
         // preserve the attributes and just overwrite VRAM index (set frame will rebuild everything)
         sprite->attribut = (sprite->attribut & TILE_ATTR_MASK) | ind;
@@ -539,25 +739,25 @@ u16 SPR_setDefinition(Sprite *sprite, const SpriteDefinition *spriteDef)
     }
 
     sprite->definition = spriteDef;
+//    FIXME: not needed
+//    sprite->animation = NULL;
+    sprite->frame = NULL;
+    sprite->frameInfo = NULL;
     sprite->animInd = -1;
     sprite->frameInd = -1;
     sprite->seqInd = -1;
-    sprite->frame = NULL;
 
     // set anim and frame to 0
     SPR_setAnimAndFrame(sprite, 0, 0);
 
 #ifdef SPR_PROFIL
-    prof = getSubTick() - prof;
-    // rollback correction
-    if (prof < 0) prof = 100;
-    profil_time[PROFIL_SET_DEF] += prof;
+    profil_time[PROFIL_SET_DEF] += getSubTick() - prof;
 #endif // SPR_PROFIL
 
     return TRUE;
 }
 
-void SPR_setPosition(Sprite *sprite, s16 x, s16 y)
+void SPR_setPosition(Sprite* sprite, s16 x, s16 y)
 {
 #ifdef SPR_PROFIL
     s32 prof = getSubTick();
@@ -585,32 +785,30 @@ void SPR_setPosition(Sprite *sprite, s16 x, s16 y)
     }
 
 #ifdef SPR_PROFIL
-    prof = getSubTick() - prof;
-    // rollback correction
-    if (prof < 0) prof = 100;
-    profil_time[PROFIL_SET_ATTRIBUTE] += prof;
+    profil_time[PROFIL_SET_ATTRIBUTE] += getSubTick() - prof;
 #endif // SPR_PROFIL
 }
 
-void SPR_setHFlip(Sprite *sprite, u16 value)
+void SPR_setHFlip(Sprite* sprite, u16 value)
 {
 #ifdef SPR_PROFIL
     s32 prof = getSubTick();
 #endif // SPR_PROFIL
 
-    const u16 oldAttribut = sprite->attribut;
+    u16 attr = sprite->attribut;
 
-    if (oldAttribut & TILE_ATTR_HFLIP_MASK)
+    if (attr & TILE_ATTR_HFLIP_MASK)
     {
         // H flip removed
         if (!value)
         {
-            u16 status = sprite->status;
-            sprite->attribut = oldAttribut & (~TILE_ATTR_HFLIP_MASK);
+            attr &= ~TILE_ATTR_HFLIP_MASK;
 
 #ifdef SPR_DEBUG
             KLog_U1_("SPR_setHFlip: #", getSpriteIndex(sprite), " removed HFlip");
 #endif // SPR_DEBUG
+
+            u16 status = sprite->status;
 
             // need to recompute visibility if auto visibility is enabled
             if (status & SPR_FLAG_AUTO_VISIBILITY)
@@ -618,6 +816,10 @@ void SPR_setHFlip(Sprite *sprite, u16 value)
 
             // need to also recompute complete VDP sprite table
             sprite->status = status | NEED_ST_ALL_UPDATE;
+
+            // update attribut and frameInfo (depend from HV flip state)
+            sprite->attribut = attr;
+            sprite->frameInfo = &(sprite->frame->frameInfos[(attr & (TILE_ATTR_HFLIP_MASK | TILE_ATTR_VFLIP_MASK)) >> TILE_ATTR_HFLIP_SFT]);
         }
     }
     else
@@ -625,49 +827,52 @@ void SPR_setHFlip(Sprite *sprite, u16 value)
         // H flip set
         if (value)
         {
-            u16 status = sprite->status;
-            sprite->attribut = oldAttribut | TILE_ATTR_HFLIP_MASK;
+            attr |= TILE_ATTR_HFLIP_MASK;
 
 #ifdef SPR_DEBUG
             KLog_U1_("SPR_setHFlip: #", getSpriteIndex(sprite), " added HFlip");
 #endif // SPR_DEBUG
 
+            u16 status = sprite->status;
+
             // need to recompute visibility if auto visibility is enabled
             if (status & SPR_FLAG_AUTO_VISIBILITY)
                 status |= NEED_VISIBILITY_UPDATE;
 
             // need to also recompute complete VDP sprite table
             sprite->status = status | NEED_ST_ALL_UPDATE;
+
+            // update attribut and frameInfo (depend from HV flip state)
+            sprite->attribut = attr;
+            sprite->frameInfo = &(sprite->frame->frameInfos[(attr & (TILE_ATTR_HFLIP_MASK | TILE_ATTR_VFLIP_MASK)) >> TILE_ATTR_HFLIP_SFT]);
         }
     }
 
 #ifdef SPR_PROFIL
-    prof = getSubTick() - prof;
-    // rollback correction
-    if (prof < 0) prof = 100;
-    profil_time[PROFIL_SET_ATTRIBUTE] += prof;
+    profil_time[PROFIL_SET_ATTRIBUTE] += getSubTick() - prof;
 #endif // SPR_PROFIL
 }
 
-void SPR_setVFlip(Sprite *sprite, u16 value)
+void SPR_setVFlip(Sprite* sprite, u16 value)
 {
 #ifdef SPR_PROFIL
     s32 prof = getSubTick();
 #endif // SPR_PROFIL
 
-    const u16 oldAttribut = sprite->attribut;
+    u16 attr = sprite->attribut;
 
-    if (oldAttribut & TILE_ATTR_VFLIP_MASK)
+    if (attr & TILE_ATTR_VFLIP_MASK)
     {
         // V flip removed
         if (!value)
         {
-            u16 status = sprite->status;
-            sprite->attribut = oldAttribut & (~TILE_ATTR_VFLIP_MASK);
+            attr &= ~TILE_ATTR_VFLIP_MASK;
 
 #ifdef SPR_DEBUG
             KLog_U1_("SPR_setVFlip: #", getSpriteIndex(sprite), " removed VFlip");
 #endif // SPR_DEBUG
+
+            u16 status = sprite->status;
 
             // need to recompute visibility if auto visibility is enabled
             if (status & SPR_FLAG_AUTO_VISIBILITY)
@@ -675,6 +880,10 @@ void SPR_setVFlip(Sprite *sprite, u16 value)
 
             // need to also recompute complete VDP sprite table
             sprite->status = status | NEED_ST_ALL_UPDATE;
+
+            // update attribut and frameInfo (depend from HV flip state)
+            sprite->attribut = attr;
+            sprite->frameInfo = &(sprite->frame->frameInfos[(attr & (TILE_ATTR_HFLIP_MASK | TILE_ATTR_VFLIP_MASK)) >> TILE_ATTR_HFLIP_SFT]);
         }
     }
     else
@@ -682,12 +891,13 @@ void SPR_setVFlip(Sprite *sprite, u16 value)
         // V flip set
         if (value)
         {
-            u16 status = sprite->status;
-            sprite->attribut = oldAttribut | TILE_ATTR_VFLIP_MASK;
+            attr |= TILE_ATTR_VFLIP_MASK;
 
 #ifdef SPR_DEBUG
             KLog_U1_("SPR_setVFlip: #", getSpriteIndex(sprite), " added VFlip");
 #endif // SPR_DEBUG
+
+            u16 status = sprite->status;
 
             // need to recompute visibility if auto visibility is enabled
             if (status & SPR_FLAG_AUTO_VISIBILITY)
@@ -695,18 +905,20 @@ void SPR_setVFlip(Sprite *sprite, u16 value)
 
             // need to also recompute complete VDP sprite table
             sprite->status = status | NEED_ST_ALL_UPDATE;
+
+            // update attribut and frameInfo (depend from HV flip state)
+            sprite->attribut = attr;
+            sprite->frameInfo = &(sprite->frame->frameInfos[(attr & (TILE_ATTR_HFLIP_MASK | TILE_ATTR_VFLIP_MASK)) >> TILE_ATTR_HFLIP_SFT]);
         }
     }
 
+
 #ifdef SPR_PROFIL
-    prof = getSubTick() - prof;
-    // rollback correction
-    if (prof < 0) prof = 100;
-    profil_time[PROFIL_SET_ATTRIBUTE] += prof;
+    profil_time[PROFIL_SET_ATTRIBUTE] += getSubTick() - prof;
 #endif // SPR_PROFIL
 }
 
-void SPR_setPriorityAttribut(Sprite *sprite, u16 value)
+void SPR_setPriorityAttribut(Sprite* sprite, u16 value)
 {
 #ifdef SPR_PROFIL
     s32 prof = getSubTick();
@@ -742,14 +954,11 @@ void SPR_setPriorityAttribut(Sprite *sprite, u16 value)
     }
 
 #ifdef SPR_PROFIL
-    prof = getSubTick() - prof;
-    // rollback correction
-    if (prof < 0) prof = 100;
-    profil_time[PROFIL_SET_ATTRIBUTE] += prof;
+    profil_time[PROFIL_SET_ATTRIBUTE] += getSubTick() - prof;
 #endif // SPR_PROFIL
 }
 
-void SPR_setPalette(Sprite *sprite, u16 value)
+void SPR_setPalette(Sprite* sprite, u16 value)
 {
 #ifdef SPR_PROFIL
     s32 prof = getSubTick();
@@ -770,47 +979,44 @@ void SPR_setPalette(Sprite *sprite, u16 value)
     }
 
 #ifdef SPR_PROFIL
-    prof = getSubTick() - prof;
-    // rollback correction
-    if (prof < 0) prof = 100;
-    profil_time[PROFIL_SET_ATTRIBUTE] += prof;
+    profil_time[PROFIL_SET_ATTRIBUTE] += getSubTick() - prof;
 #endif // SPR_PROFIL
 }
 
-void SPR_setDepth(Sprite *sprite, u16 value)
+void SPR_setDepth(Sprite* sprite, s16 value)
 {
 #ifdef SPR_PROFIL
     s32 prof = getSubTick();
 #endif // SPR_PROFIL
 
 #ifdef SPR_DEBUG
-    KLog_U2("SPR_setDepth: #", getSpriteIndex(sprite), "  Depth=", depth);
+    KLog_U2("SPR_setDepth: #", getSpriteIndex(sprite), "  Depth=", value);
 #endif // SPR_DEBUG
 
-    // depth sorting enabled for this sprite and depth changed ? --> need sorting
-    if ((sprite->status & SPR_FLAG_AUTO_DEPTH_SORTING) && (sprite->depth != value))
-        sprite->status |= NEED_DEPTH_SORTING;
-    sprite->depth = value;
+    // depth changed ?
+    if (sprite->depth != value)
+    {
+        // set depth and sort sprite (need to be done immediately to get consistent sort)
+        sprite->depth = value;
+        sortSprite(sprite);
+    }
 
 #ifdef SPR_PROFIL
-    prof = getSubTick() - prof;
-    // rollback correction
-    if (prof < 0) prof = 100;
-    profil_time[PROFIL_SET_ATTRIBUTE] += prof;
+    profil_time[PROFIL_SET_ATTRIBUTE] += getSubTick() - prof;
 #endif // SPR_PROFIL
 }
 
-void SPR_setZ(Sprite *sprite, u16 value)
+void SPR_setZ(Sprite* sprite, s16 value)
 {
     SPR_setDepth(sprite, value);
 }
 
-void SPR_setAlwaysOnTop(Sprite *sprite, u16 value)
+void SPR_setAlwaysOnTop(Sprite* sprite, u16 value)
 {
-    SPR_setDepth(sprite, 0xFFFF);
+    if (value) SPR_setDepth(sprite, SPR_MIN_DEPTH);
 }
 
-void SPR_setAnimAndFrame(Sprite *sprite, s16 anim, s16 frame)
+void SPR_setAnimAndFrame(Sprite* sprite, s16 anim, s16 frame)
 {
 #ifdef SPR_PROFIL
     s32 prof = getSubTick();
@@ -818,14 +1024,33 @@ void SPR_setAnimAndFrame(Sprite *sprite, s16 anim, s16 frame)
 
     if ((sprite->animInd != anim) || (sprite->seqInd != frame))
     {
-        Animation *animation = sprite->definition->animations[anim];
+#if (LIB_DEBUG != 0)
+        if (anim >= (s16) sprite->definition->numAnimation)
+        {
+            KLog_U2("SPR_setAnimAndFrame: error - trying to use non existing animation #", anim, " - num animation = ", sprite->definition->numAnimation);
+            return;
+        }
+#endif // LIB_DEBUG
+
+        Animation* animation = sprite->definition->animations[anim];
+
+#if (LIB_DEBUG != 0)
+        if (frame >= (s16) animation->length)
+        {
+            KLog_U3("SPR_setAnimAndFrame: error - trying to use non existing frame #", frame, " for animation #", anim, " - num frame = ", animation->length);
+            return;
+        }
+#endif // LIB_DEBUG
+
         const u16 frameInd = animation->sequence[frame];
 
         sprite->animInd = anim;
         sprite->seqInd = frame;
         sprite->animation = animation;
         sprite->frameInd = frameInd;
-        sprite->frame = animation->frames[frameInd];
+
+        // set timer to 0 to prevent auto animation to change frame in between
+        sprite->timer = 0;
 
 #ifdef SPR_DEBUG
         KLog_U4("SPR_setAnimAndFrame: #", getSpriteIndex(sprite), " anim=", anim, " frame=", frame, " adj frame=", frameInd);
@@ -835,14 +1060,11 @@ void SPR_setAnimAndFrame(Sprite *sprite, s16 anim, s16 frame)
     }
 
 #ifdef SPR_PROFIL
-    prof = getSubTick() - prof;
-    // rollback correction
-    if (prof < 0) prof = 100;
-    profil_time[PROFIL_SET_ANIM_FRAME] += prof;
+    profil_time[PROFIL_SET_ANIM_FRAME] += getSubTick() - prof;
 #endif // SPR_PROFIL
 }
 
-void SPR_setAnim(Sprite *sprite, s16 anim)
+void SPR_setAnim(Sprite* sprite, s16 anim)
 {
 #ifdef SPR_PROFIL
     s32 prof = getSubTick();
@@ -850,6 +1072,14 @@ void SPR_setAnim(Sprite *sprite, s16 anim)
 
     if (sprite->animInd != anim)
     {
+#if (LIB_DEBUG != 0)
+        if (anim >= (s16) sprite->definition->numAnimation)
+        {
+            KLog_U2("SPR_setAnim: error - trying to use non existing animation #", anim, " - num animation = ", sprite->definition->numAnimation);
+            return;
+        }
+#endif // LIB_DEBUG
+
         Animation *animation = sprite->definition->animations[anim];
         // first frame by default
         const u16 frameInd = animation->sequence[0];
@@ -858,7 +1088,9 @@ void SPR_setAnim(Sprite *sprite, s16 anim)
         sprite->seqInd = 0;
         sprite->animation = animation;
         sprite->frameInd = frameInd;
-        sprite->frame = animation->frames[frameInd];
+
+        // set timer to 0 to prevent auto animation to change frame in between
+        sprite->timer = 0;
 
 #ifdef SPR_DEBUG
         KLog_U3("SPR_setAnim: #", getSpriteIndex(sprite), " anim=", anim, " frame=0 adj frame=", frameInd);
@@ -868,14 +1100,11 @@ void SPR_setAnim(Sprite *sprite, s16 anim)
     }
 
 #ifdef SPR_PROFIL
-    prof = getSubTick() - prof;
-    // rollback correction
-    if (prof < 0) prof = 100;
-    profil_time[PROFIL_SET_ANIM_FRAME] += prof;
+    profil_time[PROFIL_SET_ANIM_FRAME] += getSubTick() - prof;
 #endif // SPR_PROFIL
 }
 
-void SPR_setFrame(Sprite *sprite, s16 frame)
+void SPR_setFrame(Sprite* sprite, s16 frame)
 {
 #ifdef SPR_PROFIL
     s32 prof = getSubTick();
@@ -883,15 +1112,24 @@ void SPR_setFrame(Sprite *sprite, s16 frame)
 
     if (sprite->seqInd != frame)
     {
-        const Animation *animation = sprite->animation;
-        const u16 frameInd = animation->sequence[frame];
+#if (LIB_DEBUG != 0)
+        if (frame >= (s16) sprite->animation->length)
+        {
+            KLog_U3("SPR_setFrame: error - trying to use non existing frame #", frame, " for animation #", sprite->animInd, " - num frame = ", sprite->animation->length);
+            return;
+        }
+#endif // LIB_DEBUG
+
+        const s16 frameInd = sprite->animation->sequence[frame];
 
         sprite->seqInd = frame;
 
         if (sprite->frameInd != frameInd)
         {
             sprite->frameInd = frameInd;
-            sprite->frame = animation->frames[frameInd];
+
+            // set timer to 0 to prevent auto animation to change frame in between
+            sprite->timer = 0;
 
 #ifdef SPR_DEBUG
             KLog_U3("SPR_setFrame: #", getSpriteIndex(sprite), "  frame=", frame, " adj frame=", frameInd);
@@ -902,14 +1140,11 @@ void SPR_setFrame(Sprite *sprite, s16 frame)
     }
 
 #ifdef SPR_PROFIL
-    prof = getSubTick() - prof;
-    // rollback correction
-    if (prof < 0) prof = 100;
-    profil_time[PROFIL_SET_ANIM_FRAME] += prof;
+    profil_time[PROFIL_SET_ANIM_FRAME] += getSubTick() - prof;
 #endif // SPR_PROFIL
 }
 
-void SPR_nextFrame(Sprite *sprite)
+void SPR_nextFrame(Sprite* sprite)
 {
 #ifdef SPR_PROFIL
     s32 prof = getSubTick();
@@ -925,14 +1160,11 @@ void SPR_nextFrame(Sprite *sprite)
     SPR_setFrame(sprite, seqInd);
 
 #ifdef SPR_PROFIL
-    prof = getSubTick() - prof;
-    // rollback correction
-    if (prof < 0) prof = 100;
-    profil_time[PROFIL_SET_ANIM_FRAME] += prof;
+    profil_time[PROFIL_SET_ANIM_FRAME] += getSubTick() - prof;
 #endif // SPR_PROFIL
 }
 
-u16 SPR_setVRAMTileIndex(Sprite *sprite, s16 value)
+bool SPR_setVRAMTileIndex(Sprite* sprite, s16 value)
 {
 #ifdef SPR_PROFIL
     s32 prof = getSubTick();
@@ -963,10 +1195,7 @@ u16 SPR_setVRAMTileIndex(Sprite *sprite, s16 value)
         else
         {
 #ifdef SPR_PROFIL
-            prof = getSubTick() - prof;
-            // rollback correction
-            if (prof < 0) prof = 100;
-            profil_time[PROFIL_SET_VRAM_OR_SPRIND] += prof;
+            profil_time[PROFIL_SET_VRAM_OR_SPRIND] += getSubTick() - prof;
 #endif // SPR_PROFIL
 
             return TRUE;
@@ -988,16 +1217,13 @@ u16 SPR_setVRAMTileIndex(Sprite *sprite, s16 value)
 #endif // SPR_DEBUG
 
             // can't allocate ?
-            if (newInd == -1)
+            if (newInd < 0)
             {
                 // save status and return FALSE
                 sprite->status = status;
 
 #ifdef SPR_PROFIL
-                prof = getSubTick() - prof;
-                // rollback correction
-                if (prof < 0) prof = 100;
-                profil_time[PROFIL_SET_VRAM_OR_SPRIND] += prof;
+                profil_time[PROFIL_SET_VRAM_OR_SPRIND] += getSubTick() - prof;
 #endif // SPR_PROFIL
 
                 return FALSE;
@@ -1008,27 +1234,27 @@ u16 SPR_setVRAMTileIndex(Sprite *sprite, s16 value)
     }
 
     // VRAM tile index changed ?
-    if ((oldAttribut & TILE_INDEX_MASK) != newInd)
+    if ((oldAttribut & TILE_INDEX_MASK) != (u16) newInd)
     {
         sprite->attribut = (oldAttribut & TILE_ATTR_MASK) | newInd;
         // need to update 'attribut' field of sprite table
         status |= NEED_ST_ATTR_UPDATE;
+        // auto tile upload enabled ? --> need to re upload tile to new location
+        if (status & SPR_FLAG_AUTO_TILE_UPLOAD)
+            status |= NEED_TILES_UPLOAD;
     }
 
     // save status
     sprite->status = status;
 
 #ifdef SPR_PROFIL
-    prof = getSubTick() - prof;
-    // rollback correction
-    if (prof < 0) prof = 100;
-    profil_time[PROFIL_SET_VRAM_OR_SPRIND] += prof;
+    profil_time[PROFIL_SET_VRAM_OR_SPRIND] += getSubTick() - prof;
 #endif // SPR_PROFIL
 
     return TRUE;
 }
 
-u16 SPR_setSpriteTableIndex(Sprite *sprite, s16 value)
+bool SPR_setSpriteTableIndex(Sprite* sprite, s16 value)
 {
 #ifdef SPR_PROFIL
     s32 prof = getSubTick();
@@ -1037,7 +1263,6 @@ u16 SPR_setSpriteTableIndex(Sprite *sprite, s16 value)
     s16 newInd;
     u16 status = sprite->status;
     u16 num = sprite->definition->maxNumSprite;
-    VDPSprite* lastVDPSprite = NULL;
 
     if (status & SPR_FLAG_AUTO_SPRITE_ALLOC)
     {
@@ -1060,10 +1285,7 @@ u16 SPR_setSpriteTableIndex(Sprite *sprite, s16 value)
         else
         {
 #ifdef SPR_PROFIL
-            prof = getSubTick() - prof;
-            // rollback correction
-            if (prof < 0) prof = 100;
-            profil_time[PROFIL_SET_VRAM_OR_SPRIND] += prof;
+            profil_time[PROFIL_SET_VRAM_OR_SPRIND] += getSubTick() - prof;
 #endif // SPR_PROFIL
 
             return TRUE;
@@ -1085,73 +1307,59 @@ u16 SPR_setSpriteTableIndex(Sprite *sprite, s16 value)
 #endif // SPR_DEBUG
 
             // can't allocate ?
-            if (newInd == -1)
+            if (newInd < 0)
             {
                 // save status and return FALSE
                 sprite->status = status;
 
 #ifdef SPR_PROFIL
-                prof = getSubTick() - prof;
-                // rollback correction
-                if (prof < 0) prof = 100;
-                profil_time[PROFIL_SET_VRAM_OR_SPRIND] += prof;
+                profil_time[PROFIL_SET_VRAM_OR_SPRIND] += getSubTick() - prof;
 #endif // SPR_PROFIL
 
                 return FALSE;
             }
-
-            // get last allocated VDP sprite pointer
-            lastVDPSprite = lastAllocatedVDPSprite;
         }
         // just use the new value for index
         else newInd = value;
     }
 
     // VDP sprite index changed ?
-    if (sprite->VDPSpriteIndex != newInd)
+    if (sprite->VDPSpriteIndex != (u16) newInd)
     {
         // set the VDP Sprite index for this sprite and do attached operation
-        setVDPSpriteIndex(sprite, newInd, num, lastVDPSprite);
+        setVDPSpriteIndex(sprite, newInd, num);
         // need to update complete sprite table infos
-        status |= NEED_ST_VISIBILITY_UPDATE | NEED_ST_ALL_UPDATE;
+        status |= NEED_ST_ALL_UPDATE;
     }
 
     // save status
     sprite->status = status;
 
 #ifdef SPR_PROFIL
-    prof = getSubTick() - prof;
-    // rollback correction
-    if (prof < 0) prof = 100;
-    profil_time[PROFIL_SET_VRAM_OR_SPRIND] += prof;
+    profil_time[PROFIL_SET_VRAM_OR_SPRIND] += getSubTick() - prof;
 #endif // SPR_PROFIL
 
     return TRUE;
 }
 
-void SPR_setAutoTileUpload(Sprite *sprite, u16 value)
+void SPR_setAutoTileUpload(Sprite* sprite, bool value)
 {
     if (value) sprite->status |= SPR_FLAG_AUTO_TILE_UPLOAD;
     else sprite->status &= ~SPR_FLAG_AUTO_TILE_UPLOAD;
 }
 
-void SPR_setDepthSorting(Sprite *sprite, u16 value)
+void SPR_setDelayedFrameUpdate(Sprite* sprite, bool value)
 {
-    if (value) sprite->status |= SPR_FLAG_AUTO_ZSORTING;
-    else sprite->status &= ~SPR_FLAG_AUTO_ZSORTING;
+    if (value) sprite->status &= ~SPR_FLAG_DISABLE_DELAYED_FRAME_UPDATE;
+    else sprite->status |= SPR_FLAG_DISABLE_DELAYED_FRAME_UPDATE;
 }
 
-void SPR_setZSorting(Sprite *sprite, u16 value)
+void SPR_setFrameChangeCallback(Sprite* sprite, FrameChangeCallback* callback)
 {
-    SPR_setDepthSorting(sprite, value);
+    sprite->onFrameChange = callback;
 }
 
-void SPR_setYSorting(Sprite *sprite, u16 value)
-{
-    SPR_setDepthSorting(sprite, value);
-}
-
-void SPR_setVisibility(Sprite *sprite, SpriteVisibility value)
+void SPR_setVisibility(Sprite* sprite, SpriteVisibility value)
 {
 #ifdef SPR_PROFIL
     s32 prof = getSubTick();
@@ -1164,17 +1372,19 @@ void SPR_setVisibility(Sprite *sprite, SpriteVisibility value)
         switch(value)
         {
             case VISIBLE:
-                status &= ~(SPR_FLAG_AUTO_VISIBILITY | NEED_VISIBILITY_UPDATE);
+                status &= ~(SPR_FLAG_AUTO_VISIBILITY | SPR_FLAG_FAST_AUTO_VISIBILITY | NEED_VISIBILITY_UPDATE);
                 status |= setVisibility(sprite, VISIBILITY_ON);
                 break;
 
             case HIDDEN:
-                status &= ~(SPR_FLAG_AUTO_VISIBILITY | NEED_VISIBILITY_UPDATE);
+                status &= ~(SPR_FLAG_AUTO_VISIBILITY | SPR_FLAG_FAST_AUTO_VISIBILITY | NEED_VISIBILITY_UPDATE);
                 status |= setVisibility(sprite, VISIBILITY_OFF);
                 break;
 
             case AUTO_FAST:
-                status |= SPR_FLAG_FAST_AUTO_VISIBILITY;
+                // passed from slow to fast visibility compute method
+                if (!(status & SPR_FLAG_FAST_AUTO_VISIBILITY))
+                    status |= SPR_FLAG_FAST_AUTO_VISIBILITY | NEED_VISIBILITY_UPDATE;
                 break;
 
             case AUTO_SLOW:
@@ -1213,30 +1423,33 @@ void SPR_setVisibility(Sprite *sprite, SpriteVisibility value)
     sprite->status = status;
 
 #ifdef SPR_PROFIL
-    prof = getSubTick() - prof;
-    // rollback correction
-    if (prof < 0) prof = 100;
-    profil_time[PROFIL_SET_VISIBILITY] += prof;
+    profil_time[PROFIL_SET_VISIBILITY] += getSubTick() - prof;
 #endif // SPR_PROFIL
 }
 
-void SPR_setAlwaysVisible(Sprite *sprite, u16 value)
+void SPR_setAlwaysVisible(Sprite* sprite, u16 value)
 {
     if (value) SPR_setVisibility(sprite, VISIBLE);
 }
 
-void SPR_setNeverVisible(Sprite *sprite, u16 value)
+void SPR_setNeverVisible(Sprite* sprite, u16 value)
 {
     if (value) SPR_setVisibility(sprite, HIDDEN);
 }
 
-u16 SPR_computeVisibility(Sprite *sprite)
+bool SPR_computeVisibility(Sprite* sprite)
 {
     u16 status = sprite->status;
 
     // update visibility if needed
     if (status & NEED_VISIBILITY_UPDATE)
-        sprite->status = (status & ~NEED_VISIBILITY_UPDATE) | updateVisibility(sprite);
+    {
+        // frame update need to be done first
+        if (status & NEED_FRAME_UPDATE)
+            status = updateFrame(sprite, status);
+        // then do visibility update
+        sprite->status = updateVisibility(sprite, status);
+    }
 
     return (sprite->visibility)?TRUE:FALSE;
 }
@@ -1252,16 +1465,13 @@ void SPR_clear()
     u8 linkSave = starter->link;
 
     VDP_clearSprites();
-    VDP_updateSprites(1, TRUE);
+    VDP_updateSprites(1, DMA_QUEUE_COPY);
 
     // restore starter link
     starter->link = linkSave;
 
 #ifdef SPR_PROFIL
-    prof = getSubTick() - prof;
-    // rollback correction
-    if (prof < 0) prof = 100;
-    profil_time[PROFIL_CLEAR] += prof;
+    profil_time[PROFIL_CLEAR] += getSubTick() - prof;
 #endif // SPR_PROFIL
 }
 
@@ -1274,7 +1484,7 @@ void SPR_update()
     Sprite* sprite;
 
 #ifdef SPR_DEBUG
-    KLog_U1("----------------- SPR_update:  sprite number = ", spriteNum);
+    KLog_U1("----------------- SPR_update:  sprite number = ", SPR_getNumActiveSprite());
 #endif // SPR_DEBUG
 
     // disable interrupts (we want to avoid DMA queue process when executing this method)
@@ -1284,8 +1494,18 @@ void SPR_update()
     KLog_U1_("  Send sprites to DMA queue: ", highestVDPSpriteIndex + 1, " sprite(s) sent");
 #endif // SPR_DEBUG
 
+    const u16 sprNum = highestVDPSpriteIndex + 1;
     // send sprites to VRAM using DMA queue (better to do it before sprite tiles upload to avoid being ignored by DMA queue)
-    VDP_updateSprites(highestVDPSpriteIndex + 1, TRUE);
+    void* vdpSpriteTableCopy = DMA_allocateAndQueueDma(DMA_VRAM, VDP_SPRITE_TABLE, (sizeof(VDPSprite) * sprNum) / 2, 2);
+
+#if (LIB_DEBUG != 0)
+    // DMA temporary buffer is full ? --> can't do sprite update
+    if (!vdpSpriteTableCopy)
+    {
+        KLog("SPR_update(): failed... DMA data buffer is full.");
+        return;
+    }
+#endif // LIB_DEBUG
 
     // iterate over all sprites
     sprite = firstSprite;
@@ -1313,8 +1533,6 @@ void SPR_update()
             else sprite->timer = timer;
         }
 
-        // can be changed by Y sorting so store it now
-        Sprite* next = sprite->next;
         u16 status = sprite->status;
 
         // trivial optimization
@@ -1322,20 +1540,24 @@ void SPR_update()
         {
             // ! order is important !
             if (status & NEED_FRAME_UPDATE)
-                status |= updateFrame(sprite);
+                status = updateFrame(sprite, status);
             if (status & NEED_VISIBILITY_UPDATE)
-                status |= updateVisibility(sprite);
-            if (status & NEED_ST_VISIBILITY_UPDATE)
-                updateSpriteTableVisibility(sprite);
+                status = updateVisibility(sprite, status);
 
-            // general processes done
-            status &= ~(NEED_FRAME_UPDATE | NEED_VISIBILITY_UPDATE | NEED_ST_VISIBILITY_UPDATE);
-
-            // only if sprite is visible
-            if (sprite->visibility)
+            // sprite not visible ?
+            if (!sprite->visibility)
             {
-                if (status & NEED_DEPTH_SORTING)
-                    sortSpriteOnDepth(sprite);
+                // need to update its visibility (done via pos Y) ?
+                if (status & NEED_ST_POS_UPDATE)
+                {
+                    // update position (and so visibility)
+                    updateSpriteTablePos(sprite);
+                    status &= ~NEED_ST_POS_UPDATE;
+                }
+            }
+            // only if sprite is visible
+            else
+            {
                 if (status & NEED_TILES_UPLOAD)
                     loadTiles(sprite);
 
@@ -1351,7 +1573,7 @@ void SPR_update()
                     updateSpriteTableAttr(sprite);
 
                 // tiles upload and sprite table done
-                status &= ~(NEED_DEPTH_SORTING | NEED_TILES_UPLOAD | NEED_ST_ALL_UPDATE);
+                status &= ~(NEED_TILES_UPLOAD | NEED_ST_ALL_UPDATE);
             }
 
             // processes done !
@@ -1359,82 +1581,20 @@ void SPR_update()
         }
 
         // next sprite
-        sprite = next;
+        sprite = sprite->next;
     }
 
-    // reset unpack buffer address
-    unpackNext = unpackBuffer;
+    // VDP sprite cache is now updated, copy it to the temporary cache copy we got from DMA queue buffer
+    memcpy(vdpSpriteTableCopy, vdpSpriteCache, sizeof(VDPSprite) * sprNum);
 
     // re-enable interrupts
     SYS_enableInts();
 
 #ifdef SPR_PROFIL
-    prof = getSubTick() - prof;
-    // rollback correction
-    if (prof < 0) prof = 100;
-    profil_time[PROFIL_UPDATE] += prof;
+    profil_time[PROFIL_UPDATE] += getSubTick() - prof;
 #endif // SPR_PROFIL
 }
 
-void SPR_sortOnDepth()
-{
-    SPR_sort(NULL);
-}
-
-void SPR_sortOnYPos()
-{
-    SPR_sort(NULL);
-}
-
-void SPR_sort(_spriteComparatorCallback* sorter)
-{
-    if (spriteNum)
-    {
-        Sprite *sprite;
-//        VDPSprite *prevVDPSprite;
-
-        // disable interrupts (we want to avoid DMA queue process when executing this method)
-        SYS_disableInts();
-
-        // sort sprites
-        sprite = lastSprite;
-        if (sorter)
-        {
-            while (sprite)
-                sprite = sortSprite(sprite, sorter);
-        }
-        else
-        {
-            while (sprite)
-                sprite = sortSpriteOnDepth(sprite);
-        }
-
-//        // rebuils all links
-//        sprite = firstSprite;
-//        prevVDPSprite = starter;
-//
-//        // then rebuild others links
-//        while(sprite)
-//        {
-//#ifdef SPR_DEBUG
-//            KLog_U3("VDPSprite #", prevVDPSprite - vdpSpriteCache, " linked to Sprite #", getSpriteIndex(sprite), " - VDP Sprite=", sprite->VDPSpriteIndex);
-//#endif // SPR_DEBUG
-//
-//            // update link
-//            prevVDPSprite->link = sprite->VDPSpriteIndex;
-//            prevVDPSprite = sprite->lastVDPSprite;
-//            // next sprite
-//            sprite = sprite->next;
-//        }
-//
-//        // end link
-//        prevVDPSprite->link = 0;
-
-        // re-enable interrupts
-        SYS_enableInts();
-
-    }
-}
 
 void SPR_logProfil()
 {
@@ -1460,7 +1620,7 @@ void SPR_logSprites()
 {
     Sprite* sprite = firstSprite;
 
-    KLog_U1_("Num sprite = ", spriteNum, " -----------------------------");
+    KLog_U1_("Num sprite = ", SPR_getNumActiveSprite(), " -----------------------------");
     while(sprite)
     {
         logSprite(sprite);
@@ -1469,13 +1629,15 @@ void SPR_logSprites()
 }
 
 
-static void setVDPSpriteIndex(Sprite *sprite, u16 ind, u16 num, VDPSprite *last)
+static void setVDPSpriteIndex(Sprite* sprite, u16 ind, u16 num)
 {
 #ifdef SPR_PROFIL
     s32 prof = getSubTick();
 #endif // SPR_PROFIL
 
-    Sprite* prev;
+    Sprite* spr;
+    VDPSprite* vdpSprite;
+    u16 i;
 
 #ifdef SPR_DEBUG
     KLog_U2("setVDPSpriteIndex: sprite #", getSpriteIndex(sprite), "  new VDP Sprite index = ", ind);
@@ -1483,55 +1645,65 @@ static void setVDPSpriteIndex(Sprite *sprite, u16 ind, u16 num, VDPSprite *last)
 
     sprite->VDPSpriteIndex = ind;
 
-    // link with previous sprite
-    if ((prev = sprite->prev)) prev->lastVDPSprite->link = ind;
+    // we don't need to hide sprite by default anymore as we take of it with 'lastNumSprite' field
+//    // hide all sprites by default and get last sprite
+//    vdpSprite = &vdpSpriteCache[ind];
+//    vdpSprite->y = 0;
+//
+//    i = num - 1;
+//    while(i--)
+//    {
+//        vdpSprite = &vdpSpriteCache[vdpSprite->link];
+//        vdpSprite->y = 0;
+//    }
+
+    // get the last vdpSprite
+    vdpSprite = &vdpSpriteCache[ind];
+    i = num - 1;
+    while(i--) vdpSprite = &vdpSpriteCache[vdpSprite->link];
+
+    // adjust VDP sprites links
+    spr = sprite->prev;
+    // do we have a previous sprite ? --> set its next link to current sprite index
+    if (spr) spr->lastVDPSprite->link = ind;
+    // othrwise we set started link
     else starter->link = ind;
 
-    // set last sprite pointer
-    if (last) sprite->lastVDPSprite = last;
-    else
-    {
-        // compute it using the slow sprite list parsing
-        VDPSprite* vspr = &vdpSpriteCache[ind];
-        u16 remaining = num - 1;
+    spr = sprite->next;
+    // do we have a next sprite ? --> set link on next sprite
+    if (spr) vdpSprite->link = spr->VDPSpriteIndex;
+    // last sprite
+    else vdpSprite->link = 0;
 
-        while(remaining--) vspr = &vdpSpriteCache[vspr->link];
-
-        // set last VDP sprite pointer for this sprite
-        sprite->lastVDPSprite = vspr;
-    }
+    // set last VDP sprite pointer for this sprite
+    sprite->lastVDPSprite = vdpSprite;
 
 #ifdef SPR_DEBUG
     KLog_U1("  last VDP sprite = ", sprite->lastVDPSprite - vdpSpriteCache);
 #endif // SPR_DEBUG
 
 #ifdef SPR_PROFIL
-    prof = getSubTick() - prof;
-    // rollback correction
-    if (prof < 0) prof = 100;
-    profil_time[PROFIL_UPDATE_VDPSPRIND] += prof;
+    profil_time[PROFIL_UPDATE_VDPSPRIND] += getSubTick() - prof;
 #endif // SPR_PROFIL
 }
 
-static u16 updateVisibility(Sprite *sprite)
+static u16 updateVisibility(Sprite* sprite, u16 status)
 {
 #ifdef SPR_PROFIL
     s32 prof = getSubTick();
 #endif // SPR_PROFIL
 
     u16 visibility;
-    AnimationFrame *frame = sprite->frame;
+    AnimationFrame* frame = sprite->frame;
 
     // fast visibility computation ?
-    if (sprite->status & SPR_FLAG_FAST_AUTO_VISIBILITY)
+    if (status & SPR_FLAG_FAST_AUTO_VISIBILITY)
     {
-        s16 x, y;
-
-        x = sprite->x;
-        y = sprite->y;
+        const s16 x = sprite->x;
+        const s16 y = sprite->y;
 
         // compute global visibility for sprite
-        if (((x + frame->w) > 0x80) && (x < (screenWidth + 0x80)) && ((y + frame->h) > 0x80) && (y < (screenHeight + 0x80)))
+        if (((x + frame->w) > (s16) 0x80) && (x < (s16) (screenWidth + 0x80)) && ((y + frame->h) > (s16) 0x80) && (y < (s16) (screenHeight + 0x80)))
             visibility = VISIBILITY_ON;
         else
             visibility = VISIBILITY_OFF;
@@ -1543,17 +1715,16 @@ static u16 updateVisibility(Sprite *sprite)
     }
     else
     {
-        s16 xmin, ymin;
-        s16 xmax, ymax;
-        s16 fw, fh;
-
-        xmin = 0x80 - sprite->x;
-        ymin = 0x80 - sprite->y;
-        xmax = screenWidth + xmin;
-        ymax = screenHeight + ymin;
-        frame = sprite->frame;
-        fw = frame->w;
-        fh = frame->h;
+        // xmin relative to sprite pos
+        const s16 xmin = 0x80 - sprite->x;
+        // ymin relative to sprite pos
+        const s16 ymin = 0x80 - sprite->y;
+        // xmax relative to sprite pos
+        const s16 xmax = screenWidth + xmin;
+        // ymax relative to sprite pos
+        const s16 ymax = screenHeight + ymin;
+        const s16 fw = frame->w;
+        const s16 fh = frame->h;
 
 #ifdef SPR_DEBUG
         KLog_S2("  updateVisibility (slow): global x=", sprite->x, " global y=", sprite->y);
@@ -1561,42 +1732,39 @@ static u16 updateVisibility(Sprite *sprite)
         KLog_S4("    xmin=", xmin, " xmax=", xmax, " ymin=", ymin, " ymax=", ymax);
 #endif // SPR_DEBUG
 
-        // full visibility ? --> just use number of total sprite and set full visible
+        // sprite is fully visible ? --> set all sprite visible
         if ((xmin <= 0) && (xmax >= fw) && (ymin <= 0) && (ymax >= fh)) visibility = VISIBILITY_ON;
+        // sprite is fully hidden ? --> set all sprite to hidden
+        else if ((xmax < 0) || ((xmin - fw) > 0) || (ymax < 0) || ((ymin - fh) > 0)) visibility = VISIBILITY_OFF;
         else
         {
-            VDPSpriteInf **spritesInf;
-            u16 attr;
+            FrameVDPSprite** frameSprites;
             u16 num;
 
-            attr = sprite->attribut;
             num = frame->numSprite;
             // start from the last one
-            spritesInf = &(frame->vdpSpritesInf[num - 1]);
-            // adjust for HV flip
-            if (attr & TILE_ATTR_HFLIP_MASK) spritesInf += num;
-            if (attr & TILE_ATTR_VFLIP_MASK) spritesInf += num << 1;
+            frameSprites = &(sprite->frameInfo->frameVDPSprites[num - 1]);
             visibility = 0;
 
             while(num--)
             {
-                VDPSpriteInf* spriteInf;
+                FrameVDPSprite* frameSprite;
                 u16 size;
                 s16 x, y;
                 s16 w, h;
 
-                spriteInf = *spritesInf--;
+                frameSprite = *frameSprites--;
 
-                // Y first to respect spriteInf field order
-                y = spriteInf->y;
-                size = spriteInf->size;
+                // Y first to respect frameSprite field order
+                y = frameSprite->offsetY;
+                size = frameSprite->size;
                 w = ((size & 0x0C) << 1) + 8;
                 h = ((size & 0x03) << 3) + 8;
-                x = spriteInf->x;
+                x = frameSprite->offsetX;
 
     #ifdef SPR_DEBUG
-                KLog_S4("    spriteInf x=", spriteInf->x, " y=", spriteInf->y, " w=", w, " h=", h);
-                KLog_S3("    attr=", attr, " adjX=", x, " adjY=", y);
+                KLog_S4("    frameSprite offX=", frameSprite->offsetX, " offY=", frameSprite->offsetY, " w=", w, " h=", h);
+                KLog_S3("    size=", size, " adjX=", x, " adjY=", y);
     #endif // SPR_DEBUG
 
                 visibility <<= 1;
@@ -1625,17 +1793,17 @@ static u16 updateVisibility(Sprite *sprite)
 #endif // SPR_DEBUG
 
 #ifdef SPR_PROFIL
-    prof = getSubTick() - prof;
-    // rollback correction
-    if (prof < 0) prof = 100;
-    profil_time[PROFIL_UPDATE_VISIBILITY] += prof;
+    profil_time[PROFIL_UPDATE_VISIBILITY] += getSubTick() - prof;
 #endif // SPR_PROFIL
 
     // set the new computed visibility
-    return setVisibility(sprite, visibility);
+    status |= setVisibility(sprite, visibility);
+
+    // visibility update done !
+    return status & ~NEED_VISIBILITY_UPDATE;
 }
 
-static u16 setVisibility(Sprite *sprite, u16 newVisibility)
+static u16 setVisibility(Sprite* sprite, u16 newVisibility)
 {
     // visibility changed ?
     if (sprite->visibility != newVisibility)
@@ -1643,14 +1811,14 @@ static u16 setVisibility(Sprite *sprite, u16 newVisibility)
         // set new visibility info
         sprite->visibility = newVisibility;
 
-        // need to recompute the visibility info in sprite table (and so fix others positions)
-        return NEED_ST_VISIBILITY_UPDATE | NEED_ST_POS_UPDATE;
+        // need to recompute the position info (hidding a sprite is done by setting posY to 0)
+        return NEED_ST_POS_UPDATE;
     }
 
     return 0;
 }
 
-static u16 updateFrame(Sprite *sprite)
+static u16 updateFrame(Sprite* sprite, u16 status)
 {
 #ifdef SPR_PROFIL
     s32 prof = getSubTick();
@@ -1660,12 +1828,60 @@ static u16 updateFrame(Sprite *sprite)
     KLog_U1("  updateFrame: sprite #", getSpriteIndex(sprite));
 #endif // SPR_DEBUG
 
-    // init timer for this frame (+1 as we update animation before sending to VDP)
-    if ((sprite->timer = sprite->frame->timer))
-        sprite->timer++;
+    AnimationFrame* frame = sprite->animation->frames[sprite->frameInd];
 
-    // get status
-    u16 status = sprite->status;
+    // we need to transfert tiles data for this sprite and frame delay is not disabled ?
+    if ((status & (SPR_FLAG_AUTO_TILE_UPLOAD | SPR_FLAG_DISABLE_DELAYED_FRAME_UPDATE)) == SPR_FLAG_AUTO_TILE_UPLOAD)
+    {
+        // not enough DMA capacity to transfer sprite tile data ?
+        const u16 dmaCapacity = DMA_getMaxTransferSize();
+
+        if (dmaCapacity && (DMA_getQueueTransferSize() + (frame->tileset->numTile * 32)) > dmaCapacity)
+        {
+#if (LIB_DEBUG != 0)
+            KLog_U3_("Warning: sprite #", getSpriteIndex(sprite), " update delayed (exceeding DMA capacity: ", DMA_getQueueTransferSize(), " bytes already queued and require ", frame->tileset->numTile * 32, " more bytes)");
+#endif // LIB_DEBUG
+
+            // initial frame update ? --> better to set frame and frameInfo pointer at least
+            if (sprite->frame == NULL)
+            {
+                // set frame
+                sprite->frame = frame;
+                // get frame info depending HV flip state
+                sprite->frameInfo = &(frame->frameInfos[(sprite->attribut & (TILE_ATTR_HFLIP_MASK | TILE_ATTR_VFLIP_MASK)) >> TILE_ATTR_HFLIP_SFT]);
+            }
+
+            // delay frame update (when we will have enough DMA capacity to do it)
+            return status;
+        }
+    }
+
+    // detect if we need to hide some VDP sprite
+    s16 currentNumSprite = frame->numSprite;
+    s16 spriteToHide = sprite->lastNumSprite - currentNumSprite;
+
+    // need to hide some sprite
+    if (spriteToHide > 0)
+        sprite->spriteToHide = spriteToHide;
+
+    // store last used number of sprite
+    sprite->lastNumSprite = currentNumSprite;
+    // set frame
+    sprite->frame = frame;
+    // get frame info depending HV flip state
+    sprite->frameInfo = &(frame->frameInfos[(sprite->attribut & (TILE_ATTR_HFLIP_MASK | TILE_ATTR_VFLIP_MASK)) >> TILE_ATTR_HFLIP_SFT]);
+
+    // init timer for this frame
+    sprite->timer = frame->timer;
+
+    // frame change event handler defined ? --> call it
+    if (sprite->onFrameChange)
+    {
+        // important to preserve status value which may be modified externally here
+        sprite->status = status;
+        sprite->onFrameChange(sprite);
+        status = sprite->status;
+    }
 
     // require tile data upload
     if (status & SPR_FLAG_AUTO_TILE_UPLOAD)
@@ -1674,116 +1890,63 @@ static u16 updateFrame(Sprite *sprite)
     if (status & SPR_FLAG_AUTO_VISIBILITY)
         status |= NEED_VISIBILITY_UPDATE;
 
-    u16 numSpriteFrame = sprite->frame->numSprite;
-
-    // number of VDP sprite to use for the current frame changed ?
-    if (sprite->frameNumSprite != numSpriteFrame)
-    {
-        sprite->frameNumSprite = numSpriteFrame;
-        // need to udpate sprite table visibility info (and so fix others positions)
-        status |= NEED_ST_VISIBILITY_UPDATE | NEED_ST_POS_UPDATE;
-    }
+    // frame update done
+    status &= ~NEED_FRAME_UPDATE;
 
 #ifdef SPR_PROFIL
-    prof = getSubTick() - prof;
-    // rollback correction
-    if (prof < 0) prof = 100;
-    profil_time[PROFIL_UPDATE_FRAME] += prof;
+    profil_time[PROFIL_UPDATE_FRAME] += getSubTick() - prof;
 #endif // SPR_PROFIL
 
     // need to update all sprite table
     return status | NEED_ST_ALL_UPDATE;
 }
 
-static void updateSpriteTableVisibility(Sprite *sprite)
+static void updateSpriteTableAll(Sprite* sprite)
 {
 #ifdef SPR_PROFIL
     s32 prof = getSubTick();
 #endif // SPR_PROFIL
 
-#ifdef SPR_DEBUG
-    KLog_U2("  updateSpriteTableVisibility: sprite #", getSpriteIndex(sprite), "  visibility = ", sprite->visibility);
-#endif // SPR_DEBUG
+    FrameVDPSprite** frameSprites;
+    VDPSprite* vdpSprite;
+    u16 attr;
+    u16 num;
+    u16 visibility;
 
-    VDPSprite *vdpSprite = &vdpSpriteCache[sprite->VDPSpriteIndex];
-    u16 visibility = sprite->visibility;
+    visibility = sprite->visibility;
+    attr = sprite->attribut;
+    num = sprite->frame->numSprite;
+    frameSprites = sprite->frameInfo->frameVDPSprites;
+    vdpSprite = &vdpSpriteCache[sprite->VDPSpriteIndex];
 
-    if (visibility)
+    while(num--)
     {
-        // all visible ?
-        if (visibility == VISIBILITY_ON)
-        {
-            u16 num = sprite->frameNumSprite;
-            u16 hiddenNum = sprite->definition->maxNumSprite - num;
-            u16 i;
+        FrameVDPSprite* frameSprite = *frameSprites++;
 
-            i = num;
-            // pass visible sprite
-            while(i--) vdpSprite = &vdpSpriteCache[vdpSprite->link];
+        // Y first to respect VDP field order
+        if (visibility & 1) vdpSprite->y = sprite->y + frameSprite->offsetY;
+        else vdpSprite->y = 0;
+        vdpSprite->size = frameSprite->size;
+        vdpSprite->attribut = attr;
+        vdpSprite->x = sprite->x + frameSprite->offsetX;
 
-            if (hiddenNum)
-            {
-                // hide sprite
-                vdpSprite->y = 0;
-
-                // take remaining minus 1
-                i = hiddenNum - 1;
-                while(i--)
-                {
-                    // get next sprite
-                    vdpSprite = &vdpSpriteCache[vdpSprite->link];
-                    // hide it
-                    vdpSprite->y = 0;
-                }
-            }
-        }
-        // partially visible
-        else
-        {
-            // sprite not visible ? --> hide it
-            if (!(visibility & 1)) vdpSprite->y = 0;
-            // pass to next VDP sprite
-            visibility >>= 1;
-
-            s16 i = sprite->definition->maxNumSprite - 1;
-            while(visibility && i--)
-            {
-                // get next sprite
-                vdpSprite = &vdpSpriteCache[vdpSprite->link];
-                // sprite not visible ? --> hide it
-                if (!(visibility & 1)) vdpSprite->y = 0;
-                // pass to next VDP sprite
-                visibility >>= 1;
-            }
-
-            // FIXME: this test may be useless
-            if (i > 0)
-            {
-                // hide remaining sprites
-                while(i--)
-                {
-                    // get next sprite
-                    vdpSprite = &vdpSpriteCache[vdpSprite->link];
-                    // hide it
-                    vdpSprite->y = 0;
-                }
-            }
-        }
+        // increment tile index in attribut field
+        attr += frameSprite->numTile;
+        // next VDP sprite
+        visibility >>= 1;
+        vdpSprite = &vdpSpriteCache[vdpSprite->link];
     }
-    // all hidden
-    else
-    {
-        // hide sprite
-        vdpSprite->y = 0;
 
-        u16 i = sprite->definition->maxNumSprite - 1;
-        while(i--)
+    // hide sprites that were used by previous frame
+    if ((num = sprite->spriteToHide))
+    {
+        while(num--)
         {
-            // get next sprite
-            vdpSprite = &vdpSpriteCache[vdpSprite->link];
-            // hide it
             vdpSprite->y = 0;
+            vdpSprite = &vdpSpriteCache[vdpSprite->link];
         }
+
+        sprite->spriteToHide = 0;
     }
 
 #ifdef SPR_DEBUG
@@ -1801,156 +1964,50 @@ static void updateSpriteTableVisibility(Sprite *sprite)
 
 
 #ifdef SPR_PROFIL
-    prof = getSubTick() - prof;
-    // rollback correction
-    if (prof < 0) prof = 100;
-    profil_time[PROFIL_UPDATE_VISTABLE] += prof;
+    profil_time[PROFIL_UPDATE_SPRITE_TABLE] += getSubTick() - prof;
 #endif // SPR_PROFIL
 }
 
-static void updateSpriteTableAll(Sprite *sprite)
+static void updateSpriteTablePos(Sprite* sprite)
 {
 #ifdef SPR_PROFIL
     s32 prof = getSubTick();
 #endif // SPR_PROFIL
 
-    AnimationFrame *frame;
-    VDPSpriteInf **spritesInf;
-    VDPSprite *vdpSprite;
-    u16 attr;
+    FrameVDPSprite** frameSprites;
+    VDPSprite* vdpSprite;
     u16 num;
     u16 visibility;
 
     visibility = sprite->visibility;
-    frame = sprite->frame;
-    attr = sprite->attribut;
-    num = frame->numSprite;
-    spritesInf = frame->vdpSpritesInf;
-    if (attr & TILE_ATTR_HFLIP_MASK) spritesInf += num;
-    if (attr & TILE_ATTR_VFLIP_MASK) spritesInf += num << 1;
+    num = sprite->frame->numSprite;
+    frameSprites = sprite->frameInfo->frameVDPSprites;
     vdpSprite = &vdpSpriteCache[sprite->VDPSpriteIndex];
 
-    // all visible ?
-    if (visibility == VISIBILITY_ON)
+    while(num--)
+    {
+        FrameVDPSprite* frameSprite = *frameSprites++;
+
+        // Y first to respect VDP field order
+        if (visibility & 1) vdpSprite->y = sprite->y + frameSprite->offsetY;
+        else vdpSprite->y = 0;
+        vdpSprite->x = sprite->x + frameSprite->offsetX;
+
+        // pass to next VDP sprite
+        visibility >>= 1;
+        vdpSprite = &vdpSpriteCache[vdpSprite->link];
+    }
+
+    // hide sprites that were used by previous frame
+    if ((num = sprite->spriteToHide))
     {
         while(num--)
         {
-            VDPSpriteInf* spriteInf = *spritesInf++;
-
-            // Y first to respect VDP field order
-            vdpSprite->y = sprite->y + spriteInf->y;
-            vdpSprite->size = spriteInf->size;
-            vdpSprite->attribut = attr;
-            vdpSprite->x = sprite->x + spriteInf->x;
-
-            // increment tile index in attribut field
-            attr += spriteInf->numTile;
-            // next VDP sprite
+            vdpSprite->y = 0;
             vdpSprite = &vdpSpriteCache[vdpSprite->link];
         }
-    }
-    else
-    {
-        while(visibility)
-        {
-            VDPSpriteInf* spriteInf = *spritesInf++;
 
-            // sprite visible ?
-            if (visibility & 1)
-            {
-                // Y first to respect VDP field order
-                vdpSprite->y = sprite->y + spriteInf->y;
-                vdpSprite->x = sprite->x + spriteInf->x;
-            }
-
-            vdpSprite->size = spriteInf->size;
-            vdpSprite->attribut = attr;
-            // increment tile index in attribut field
-            attr += spriteInf->numTile;
-            // pass to next VDP sprite
-            visibility >>= 1;
-            vdpSprite = &vdpSpriteCache[vdpSprite->link];
-        }
-    }
-
-#ifdef SPR_DEBUG
-    {
-        u16 ind = sprite->VDPSpriteIndex;
-        u16 i = sprite->definition->maxNumSprite;
-        while(i--)
-        {
-            logVDPSprite(ind);
-            // get next sprite
-            ind = vdpSpriteCache[ind].link;
-        }
-    }
-#endif // SPR_DEBUG
-
-
-#ifdef SPR_PROFIL
-    prof = getSubTick() - prof;
-    // rollback correction
-    if (prof < 0) prof = 100;
-    profil_time[PROFIL_UPDATE_SPRITE_TABLE] += prof;
-#endif // SPR_PROFIL
-}
-
-static void updateSpriteTablePos(Sprite *sprite)
-{
-#ifdef SPR_PROFIL
-    s32 prof = getSubTick();
-#endif // SPR_PROFIL
-
-    AnimationFrame *frame;
-    VDPSpriteInf **spritesInf;
-    VDPSprite *vdpSprite;
-    u16 attr;
-    u16 num;
-    u16 visibility;
-
-    visibility = sprite->visibility;
-    frame = sprite->frame;
-    attr = sprite->attribut;
-    num = frame->numSprite;
-    spritesInf = frame->vdpSpritesInf;
-    if (attr & TILE_ATTR_HFLIP_MASK) spritesInf += num;
-    if (attr & TILE_ATTR_VFLIP_MASK) spritesInf += num << 1;
-    vdpSprite = &vdpSpriteCache[sprite->VDPSpriteIndex];
-
-    // all visible ?
-    if (visibility == VISIBILITY_ON)
-    {
-        while(num--)
-        {
-            VDPSpriteInf* spriteInf = *spritesInf++;
-
-            // Y first to respect VDP field order
-            vdpSprite->y = sprite->y + spriteInf->y;
-            vdpSprite->x = sprite->x + spriteInf->x;
-
-            // pass to next VDP sprite
-            vdpSprite = &vdpSpriteCache[vdpSprite->link];
-        }
-    }
-    else
-    {
-        while(visibility)
-        {
-            VDPSpriteInf* spriteInf = *spritesInf++;
-
-            // sprite visible ?
-            if (visibility & 1)
-            {
-                // Y first to respect VDP field order
-                vdpSprite->y = sprite->y + spriteInf->y;
-                vdpSprite->x = sprite->x + spriteInf->x;
-            }
-
-            // pass to next VDP sprite
-            visibility >>= 1;
-            // pass to next VDP sprite
-            vdpSprite = &vdpSpriteCache[vdpSprite->link];
-        }
+        sprite->spriteToHide = 0;
     }
 
 #ifdef SPR_DEBUG
@@ -1967,43 +2024,38 @@ static void updateSpriteTablePos(Sprite *sprite)
 #endif // SPR_DEBUG
 
 #ifdef SPR_PROFIL
-    prof = getSubTick() - prof;
-    // rollback correction
-    if (prof < 0) prof = 100;
-    profil_time[PROFIL_UPDATE_SPRITE_TABLE] += prof;
+    profil_time[PROFIL_UPDATE_SPRITE_TABLE] += getSubTick() - prof;
 #endif // SPR_PROFIL
 }
 
-static void updateSpriteTableAttr(Sprite *sprite)
+static void updateSpriteTableAttr(Sprite* sprite)
 {
 #ifdef SPR_PROFIL
     s32 prof = getSubTick();
 #endif // SPR_PROFIL
 
-    AnimationFrame *frame;
-    VDPSpriteInf **spritesInf;
-    VDPSprite *vdpSprite;
+    FrameVDPSprite** frameSprites;
+    VDPSprite* vdpSprite;
     u16 attr;
     u16 num;
 
-    frame = sprite->frame;
     attr = sprite->attribut;
-    num = frame->numSprite;
-    spritesInf = frame->vdpSpritesInf;
+    num = sprite->frame->numSprite;
+    frameSprites = sprite->frameInfo->frameVDPSprites;
     vdpSprite = &vdpSpriteCache[sprite->VDPSpriteIndex];
 
 #ifdef SPR_DEBUG
-    KLog_U3("  updateSpriteTableAttr_allVisible: numSprite=", frame->numSprite, " visibility=", sprite->visibility, " VDPSprIndex=", sprite->VDPSpriteIndex);
+    KLog_U3("  updateSpriteTableAttr_allVisible: numSprite=", sprite->frame->numSprite, " visibility=", sprite->visibility, " VDPSprIndex=", sprite->VDPSpriteIndex);
 #endif // SPR_DEBUG
 
     while(num--)
     {
-        VDPSpriteInf* spriteInf = *spritesInf++;
+        FrameVDPSprite* frameSprite = *frameSprites++;
 
         vdpSprite->attribut = attr;
 
         // increment tile index in attribut field
-        attr += spriteInf->numTile;
+        attr += frameSprite->numTile;
         // pass to next VDP sprite
         vdpSprite = &vdpSpriteCache[vdpSprite->link];
     }
@@ -2022,50 +2074,51 @@ static void updateSpriteTableAttr(Sprite *sprite)
 #endif // SPR_DEBUG
 
 #ifdef SPR_PROFIL
-    prof = getSubTick() - prof;
-    // rollback correction
-    if (prof < 0) prof = 100;
-    profil_time[PROFIL_UPDATE_SPRITE_TABLE] += prof;
+    profil_time[PROFIL_UPDATE_SPRITE_TABLE] += getSubTick() - prof;
 #endif // SPR_PROFIL
 }
 
-static void loadTiles(Sprite *sprite)
+static void loadTiles(Sprite* sprite)
 {
 #ifdef SPR_PROFIL
     s32 prof = getSubTick();
 #endif // SPR_PROFIL
 
-    TileSet *tileset = sprite->frame->tileset;
+    TileSet* tileset = sprite->frame->tileset;
     u16 compression = tileset->compression;
     u16 lenInWord = (tileset->numTile * 32) / 2;
+
+    // TODO: separate tileset per VDP sprite and only unpack/upload visible VDP sprite (using visibility) to VRAM
 
     // need unpacking ?
     if (compression != COMPRESSION_NONE)
     {
-        // unpack
-        unpack(compression, (u8*) tileset->tiles, unpackNext);
-        // queue DMA operation to transfert unpacked data to VRAM
-        DMA_queueDma(DMA_VRAM, (u32) unpackNext, (sprite->attribut & TILE_INDEX_MASK) * 32, lenInWord, 2);
+        // get buffer and send to DMA queue
+        u8* buf = DMA_allocateAndQueueDma(DMA_VRAM, (sprite->attribut & TILE_INDEX_MASK) * 32, lenInWord, 2);
+
+#if (LIB_DEBUG != 0)
+        if (!buf) KDebug_Alert("  loadTiles: unpack tileset failed (DMA temporary buffre is full)");
+        else
+#endif
+        // unpack in temp buffer obtained from DMA queue
+        unpack(compression, (u8*) FAR(tileset->tiles), buf);
 
 #ifdef SPR_DEBUG
         char str1[32];
         char str2[8];
 
-        intToHex((u32) unpackNext, str2, 4);
+        intToHex((u32) buf, str2, 4);
         strcpy(str1, " at ");
         strcat(str1, str2);
 
         KLog_U1_("  loadTiles: unpack tileset, numTile= ", tileset->numTile, str1);
         KLog_U2("    Queue DMA: to=", (sprite->attribut & TILE_INDEX_MASK) * 32, " size in word=", lenInWord);
 #endif // SPR_DEBUG
-
-        // update unpacking address
-        unpackNext += lenInWord * 2;
     }
-    // just queue DMA operation to transfert tileset data to VRAM
     else
     {
-        DMA_queueDma(DMA_VRAM, (u32) tileset->tiles, (sprite->attribut & TILE_INDEX_MASK) * 32, lenInWord, 2);
+        // just queue DMA operation to transfer tileset data to VRAM
+        DMA_queueDma(DMA_VRAM, FAR(tileset->tiles), (sprite->attribut & TILE_INDEX_MASK) * 32, lenInWord, 2);
 
 #ifdef SPR_DEBUG
         KLog_U3("  loadTiles - queue DMA: from=", (u32) tileset->tiles, " to=", (sprite->attribut & TILE_INDEX_MASK) * 32, " size in word=", lenInWord);
@@ -2073,25 +2126,22 @@ static void loadTiles(Sprite *sprite)
     }
 
 #ifdef SPR_PROFIL
-    prof = getSubTick() - prof;
-    // rollback correction
-    if (prof < 0) prof = 100;
-    profil_time[PROFIL_LOADTILES] += prof;
+    profil_time[PROFIL_LOADTILES] += getSubTick() - prof;
 #endif // SPR_PROFIL
 }
 
-static Sprite* sortSpriteOnDepth(Sprite* sprite)
+static Sprite* sortSprite(Sprite* sprite)
 {
 #ifdef SPR_PROFIL
     s32 prof = getSubTick();
 #endif // SPR_PROFIL
 
-    Sprite* prev = sprite->prev;
-    Sprite* next = sprite->next;
+    Sprite* const prev = sprite->prev;
+    Sprite* const next = sprite->next;
     Sprite* s;
 
     // cache sprite depth coordinate
-    const u16 sdepth = sprite->depth;
+    const s16 sdepth = sprite->depth;
 
 #ifdef SPR_DEBUG
     KLog_U2("Start depth compare for sprite #", getSpriteIndex(sprite), " VDP Sprite Ind=", sprite->VDPSpriteIndex);
@@ -2099,19 +2149,16 @@ static Sprite* sortSpriteOnDepth(Sprite* sprite)
 
     // find position forward first
     s = next;
-    while(s && (s->depth > sdepth)) s = s->next;
-    // position changed ?
-    if (s != next)
-    {
-        // adjust on previous as we insert *after*
-        if (s) s = s->prev;
-        else s = lastSprite;
-    }
+    while(s && (s->depth < sdepth)) s = s->next;
+    // position changed ? --> insert sprite after s->prev (as s is pointing on 'next')
+    if (s != next) moveAfter(s?s->prev:lastSprite, sprite);
     else
     {
-        // try to find position babckward then
+        // try to find position backward then
         s = prev;
-        while(s && (s->depth < sdepth)) s = s->prev;
+        while(s && (s->depth > sdepth)) s = s->prev;
+        // position changed ? --> insert sprite after s
+        if (s != prev) moveAfter(s, sprite);
     }
 
 #ifdef SPR_DEBUG
@@ -2119,69 +2166,13 @@ static Sprite* sortSpriteOnDepth(Sprite* sprite)
     else KLog_U1("Position for sprite = ", 0);
 #endif // SPR_DEBUG
 
-    // position changed ? --> insert sprite after s
-    if (s != prev) moveAfter(s, sprite);
 
 #ifdef SPR_PROFIL
-    prof = getSubTick() - prof;
-    // rollback correction
-    if (prof < 0) prof = 100;
-    profil_time[PROFIL_SORT] += prof;
+    profil_time[PROFIL_SORT] += getSubTick() - prof;
 #endif // SPR_PROFIL
 
     // return prev just for convenience on full sorting
     return prev;
-}
-
-static Sprite* sortSprite(Sprite* sprite, _spriteComparatorCallback* sorter)
-{
-#ifdef SPR_PROFIL
-    s32 prof = getSubTick();
-#endif // SPR_PROFIL
-
-    Sprite* prev = sprite->prev;
-    Sprite* next = sprite->next;
-    Sprite* s;
-
-#ifdef SPR_DEBUG
-    KLog_U2("Start custom compare for sprite #", getSpriteIndex(sprite), " VDP Sprite Ind=", sprite->VDPSpriteIndex);
-#endif // SPR_DEBUG
-
-    // find position forward first
-    s = next;
-    while(s && (sorter(s, sprite) > 0)) s = s->next;
-
-    // position changed ?
-    if (s != next)
-    {
-        // adjust on previous as we insert *after*
-        if (s) s = s->prev;
-        else s = lastSprite;
-    }
-    else
-    {
-        // try to find position babckward then
-        s = prev;
-        while(s && (sorter(s, sprite) < 0)) s = s->prev;
-    }
-
-#ifdef SPR_DEBUG
-    if (s) KLog_U1("Position for sprite = ", getSpriteIndex(s) + 1);
-    else KLog_U1("Position for sprite = ", 0);
-#endif // SPR_DEBUG
-
-    // position changed ? --> insert sprite after s
-    if (s != prev) moveAfter(s, sprite);
-
-    // return prev just for convenience on full sorting
-    return prev;
-
-#ifdef SPR_PROFIL
-    prof = getSubTick() - prof;
-    // rollback correction
-    if (prof < 0) prof = 100;
-    profil_time[PROFIL_SORT] += prof;
-#endif // SPR_PROFIL
 }
 
 static void moveAfter(Sprite* pos, Sprite* sprite)
@@ -2194,9 +2185,9 @@ static void moveAfter(Sprite* pos, Sprite* sprite)
     else KLog_U1_("Insert #", getSpriteIndex(sprite), "  at #0");
 #endif // SPR_DEBUG
 
+    // we first remove the sprite from its current position
     if (prev)
     {
-        // remove sprite from its position
         prev->next = next;
         if (next)
         {
@@ -2213,7 +2204,7 @@ static void moveAfter(Sprite* pos, Sprite* sprite)
     }
     else
     {
-        // remove sprite from its position
+        // 'next' become the first sprite
         firstSprite = next;
         if (next)
         {
@@ -2223,13 +2214,14 @@ static void moveAfter(Sprite* pos, Sprite* sprite)
         }
         else
         {
+            // no more sprite (both firstSprite and lastSprite == NULL)
             lastSprite = prev;
             // fix sprite link from previous sprite
             starter->link = 0;
         }
     }
 
-    // and insert after 'pos'
+    // then we re-insert after 'pos'
     if (pos)
     {
         next = pos->next;
@@ -2242,12 +2234,16 @@ static void moveAfter(Sprite* pos, Sprite* sprite)
         sprite->lastVDPSprite->link = pos->lastVDPSprite->link;
         pos->lastVDPSprite->link = sprite->VDPSpriteIndex;
     }
-    // or set it as first sprite
+    // or we insert before 'firstSprite' (become the new first sprite)
     else
     {
         sprite->next = firstSprite;
         sprite->prev = NULL;
-        firstSprite->prev = sprite;
+        // sprite become the preceding sprite of previous first sprite
+        if (firstSprite) firstSprite->prev = sprite;
+        // no previous first sprite ? --> sprite becomes last sprite then
+        else lastSprite = sprite;
+        // sprite become first sprite
         firstSprite = sprite;
         // fix sprite link
         sprite->lastVDPSprite->link = starter->link;
@@ -2255,7 +2251,7 @@ static void moveAfter(Sprite* pos, Sprite* sprite)
     }
 }
 
-static u16 getSpriteIndex(Sprite *sprite)
+static u16 getSpriteIndex(Sprite* sprite)
 {
     u16 res = 0;
     Sprite* s = firstSprite;
@@ -2269,11 +2265,12 @@ static u16 getSpriteIndex(Sprite *sprite)
     return res;
 }
 
-static void logSprite(Sprite *sprite)
+static void logSprite(Sprite* sprite)
 {
     KLog_U2("Sprite #", getSpriteIndex(sprite), " ------------- status=", sprite->status);
     KLog_U3("animInd=", sprite->animInd, " seqInd=", sprite->seqInd, " frameInd=", sprite->frameInd);
-    KLog_U4("attribut=", sprite->attribut, " x=", sprite->x, " y=", sprite->y, " visibility=", sprite->visibility);
-    KLog_U3("timer=", sprite->timer, " frameNumSpr=", sprite->frameNumSprite, " VDPSpriteInd=", sprite->VDPSpriteIndex);
+    KLog_S4("attribut=", sprite->attribut, " x=", sprite->x, " y=", sprite->y, " depth=", sprite->depth);
+    KLog_U2("visibility=", sprite->visibility, " timer=", sprite->timer);
+    KLog_U2("VDPSpriteInd=", sprite->VDPSpriteIndex, " link=", sprite->lastVDPSprite->link);
     KLog_U2("prev=", (sprite->prev==NULL)?128:getSpriteIndex(sprite->prev), " next=", (sprite->next==NULL)?128:getSpriteIndex(sprite->next));
 }

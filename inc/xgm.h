@@ -47,7 +47,9 @@ void XGM_startPlay(const u8 *song);
 void XGM_stopPlay();
 /**
  * \brief
- *      Pause playing music, music can be resumed by calling #XGM_resumePlay (XGM music player driver).
+ *      Pause playing music, music can be resumed by calling #XGM_resumePlay (XGM music player driver).<br>
+ *      Note that due to the nature of the music chip (FM synthesis), resume play operation will never be perfect
+ *      and some notes will miss until next key-on event occurs.
  *
  *  \see XGM_resumePlay
  *  \see XGM_stopPlay
@@ -55,7 +57,9 @@ void XGM_stopPlay();
 void XGM_pausePlay();
 /**
  * \brief
- *      Resume playing music after pausing with XGM_pausePlay (XGM music player driver).
+ *      Resume playing music after pausing with XGM_pausePlay (XGM music player driver).<br>
+ *      Note that due to the nature of the music chip (FM synthesis), resume play operation will never be perfect
+ *      and some notes will miss until next key-on event occurs.
  *
  *  \see XGM_pausePlay
  *  \see XGM_nextFrame
@@ -78,7 +82,8 @@ void XGM_resumePlay();
  *      will actually return play state for channel 1 and channel 2.
  *
  *  \return
- *      Return non zero if specified channel(s) is(are) playing.
+ *      Return the channel mask of current playing channel(s).<br>
+ *      For instance it returns (SOUND_PCM_CH1_MSK | SOUND_PCM_CH3_MSK) if channels 1 and 3 are currently playing.
  */
 u8 XGM_isPlayingPCM(const u16 channel_mask);
 /**
@@ -125,7 +130,7 @@ void XGM_setPCMFast(const u8 id, const u8 *sample, const u32 len);
  *      Note that music may use the first PCM channel so it's better to use channel 2 to 4 for SFX.
  *
  *  \param id
- *      Sample id (set #XGM_setPCM method)
+ *      Sample id (use #XGM_setPCM(..) method first to set id)
  *  \param priority
  *      Value should go from 0 to 15 where 0 is lowest priority and 15 the highest one.<br>
  *      If the channel was already playing the priority is used to determine if the new SFX should replace the current one (new priority >= old priority).

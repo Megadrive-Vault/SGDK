@@ -7,6 +7,7 @@
 #include "dma.h"
 #include "tools.h"
 #include "string.h"
+#include "memory.h"
 
 
 // important to have a global structure here (consumes 640 bytes of memory)
@@ -56,7 +57,7 @@ s16 VDP_allocateSprites(u16 num)
     if ((free - allocStack) < num)
     {
 #if (LIB_DEBUG != 0)
-        KLog_U2_("Couldn't allocate ", num, " VDP Sprite(s): ", VDP_getAvailableSprites(), " remaining.");
+        KLog_U2("VDP_allocateSprites(", num, ") failed: no enough free VDP Sprite - remaining = ", VDP_getAvailableSprites());
 #endif
 
         return -1;
@@ -91,6 +92,10 @@ s16 VDP_allocateSprites(u16 num)
     // keep trace of last allocated sprite
     lastAllocatedVDPSprite = spr;
 
+#if (LIB_DEBUG != 0)
+    KLog_U3("VDP_allocateSprites(", num, ") success: ", res, " - remaining = ", VDP_getAvailableSprites());
+#endif
+
     // return allocated sprite index
     return res;
 }
@@ -111,6 +116,10 @@ void VDP_releaseSprites(u16 index, u16 num)
         // release sprite
         *free++ = spr;
     }
+
+#if (LIB_DEBUG != 0)
+    KLog_U3("VDP_releaseSprites(", index, ", ", num, ") --> remaining = ", VDP_getAvailableSprites());
+#endif
 }
 
 u16 VDP_getAvailableSprites()
@@ -212,7 +221,7 @@ VDPSprite* VDP_linkSprites(u16 index, u16 num)
     return spr;
 }
 
-void VDP_updateSprites(u16 num, u16 queue)
+void VDP_updateSprites(u16 num, TransferMethod tm)
 {
     // 0 is a special value to hide all sprite
     if (num == 0)
@@ -221,11 +230,7 @@ void VDP_updateSprites(u16 num, u16 queue)
         num = 1;
     }
 
-    // send the sprite cache to VRAM sprite table using DMA queue
-    if (queue)
-        DMA_queueDma(DMA_VRAM, (u32) vdpSpriteCache, VDP_SPRITE_TABLE, (sizeof(VDPSprite) / 2) * num, 2);
-    else
-        DMA_doDma(DMA_VRAM, (u32) vdpSpriteCache, VDP_SPRITE_TABLE, (sizeof(VDPSprite) / 2) * num, 2);
+    DMA_transfer(tm, DMA_VRAM, vdpSpriteCache, VDP_SPRITE_TABLE, (sizeof(VDPSprite) * num) / 2, 2);
 }
 
 void logVDPSprite(u16 index)

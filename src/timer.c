@@ -30,6 +30,8 @@
 //|VCounter      |[1]0x00-0xEA     |[1]0x00-0xFF
 //|progression   |[2]0xE5-0xFF     |[2]0x00-0xFF
 
+// we don't want to share them outside
+extern u16 getAdjustedVCounterInternal(u16 blank, u16 vcnt);
 
 vu32 vtimer;
 
@@ -38,30 +40,11 @@ static u32 lastSTick = 0;
 
 
 // return elapsed time from console reset (1/76800 second based)
-// WARNING : this function isn't accurate because of the VCounter rollback
-u32 getSubTick()
+// WARNING : this function isn't accurate because of the VCounter rollback during VBlank
+u32 getSubTickInternal(u16 blank, u16 vcnt, u32 vt)
 {
-    u16 vcnt;
-
-    vcnt = GET_VCOUNTER;
-    if (IS_PALSYSTEM)
-    {
-        // potentially in rollback / vblank --> use medium value
-        if (vcnt >= 0xCA) vcnt = 8;
-        // potentially in rollback --> use medium value
-        else if ((vcnt <= 0x0A) && GET_VDPSTATUS(VDP_VBLANK_FLAG)) vcnt = 8;
-        // use normal value
-        else vcnt += 16;
-    }
-    else
-    {
-        // potentially in rollback / vblank --> use medium value
-        if (vcnt >= 0xDF) vcnt = 8;
-        // use normal value
-        else vcnt += 16;
-    }
-
-    u32 current = (vtimer << 8) + vcnt;
+    u16 vc = getAdjustedVCounterInternal(blank, vcnt);
+    u32 current = (vt << 8) + vc;
 
     // possible only if vtimer not yet increase while in vblank --> fix
     if (current < lastSTick) current += 256;
@@ -69,6 +52,11 @@ u32 getSubTick()
 
     if (IS_PALSYSTEM) return current * 6;
     else return current * 5;
+}
+
+u32 getSubTick()
+{
+    return getSubTickInternal(GET_VDPSTATUS(VDP_VBLANK_FLAG), GET_VCOUNTER, vtimer);
 }
 
 // return elapsed time from console reset (1/300 second based)
@@ -120,29 +108,28 @@ u32 getTimer(u16 numTimer, u16 restart)
 // WARNING : this function isn't accurate because of the VCounter rollback
 void waitSubTick(u32 subtick)
 {
-    u32 start;
-    u32 current;
-    u32 i;
-
-    // waitSubTick(...) can not be called from V-Int callback or when V-Int is disabled
-    if (SYS_getInterruptMaskLevel() >= 6)
+    // waitSubTick(...) can not be used from V-Int callback or when HV counter is latched
+    if ((SYS_getInterruptMaskLevel() >= 6) || VDP_getHVLatching())
     {
-        i = subtick;
+        u32 i = subtick;
 
         while(i--)
         {
-            u16 j;
+            u32 tmp;
 
-            // TODO: use cycle accurate wait loop in asm
-            // about 100 cycles for 1 subtick
-            j = 6;
-            while(j--) asm("nop");
+            // TODO: use cycle accurate wait loop in asm (about 100 cycles for 1 subtick)
+            asm volatile ("moveq #7,%0\n"
+                "1:\n\t"
+                "dbra %0,1b\n\t"
+                : "=d" (tmp) : : "cc"
+            );
         }
 
         return;
     }
 
-    start = getSubTick();
+    const u32 start = getSubTick();
+    u32 current;
 
     // wait until we reached subtick
     do
@@ -175,8 +162,12 @@ void waitTick(u32 tick)
     while ((getTick() - start) < tick);
 }
 
-// wait for a certain amount of millisecond (~3.33 ms based timer so use 4 ms at least)
+// wait for a certain amount of millisecond (~3.33 ms based timer when wait is >= 100ms)
 void waitMs(u32 ms)
 {
-    waitTick((ms * TICKPERSECOND) / 1000);
+    // try "accurate" wait for small amount of time
+    if (ms < 100)
+        waitSubTick((ms * SUBTICKPERSECOND) / 1000);
+    else
+        waitTick((ms * TICKPERSECOND) / 1000);
 }

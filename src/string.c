@@ -11,16 +11,18 @@
 #define P01 10
 #define P02 100
 #define P03 1000
-#define P04 1000 * 10
-#define P05 1000 * 100
-#define P06 1000 * 1000
-#define P07 1000 * 1000 * 10
-#define P08 1000 * 1000 * 100
-#define P09 1000 * 1000 * 1000
-#define P10 1000 * 1000 * 1000 * 10
+#define P04 10000
+#define P05 100000
+#define P06 1000000
+#define P07 10000000
+#define P08 100000000
+#define P09 1000000000
+#define P10 10000000000
 
+#if (ENABLE_NEWLIB == 0)
 static const char const uppercase_hexchars[] = "0123456789ABCDEF";
 static const char const lowercase_hexchars[] = "0123456789abcdef";
+#endif  // ENABLE_NEWLIB
 static const char digits[] =
     "0001020304050607080910111213141516171819"
     "2021222324252627282930313233343536373839"
@@ -29,11 +31,15 @@ static const char digits[] =
     "8081828384858687888990919293949596979899";
 
 // FORWARD
-static u16 digits10(const u32 v);
+static u16 digits10(const u16 v);
+static u16 uint16ToStr(u16 value, char *str, u16 minsize);
+#if (ENABLE_NEWLIB == 0)
 static u16 skip_atoi(const char **s);
 static u16 vsprintf(char *buf, const char *fmt, va_list args);
+#endif  // ENABLE_NEWLIB
 
 
+#if (ENABLE_NEWLIB == 0)
 u16 strlen(const char *str)
 {
     const char *src;
@@ -68,13 +74,6 @@ s16 strcmp(const char *str1, const char *str2)
     while (c1 && (c1 == c2));
 
     return c1 - c2;
-}
-
-char* strclr(char *str)
-{
-    str[0] = 0;
-
-    return str;
 }
 
 char* strcpy(char *to, const char *from)
@@ -134,6 +133,14 @@ char* strcat(char *to, const char *from)
 
     return to;
 }
+#endif  // ENABLE_NEWLIB
+
+char* strclr(char *str)
+{
+    str[0] = 0;
+
+    return str;
+}
 
 char *strreplacechar(char *str, char oldc, char newc)
 {
@@ -152,6 +159,12 @@ char *strreplacechar(char *str, char oldc, char newc)
 
 u16 intToStr(s32 value, char *str, u16 minsize)
 {
+    if (value < -500000000)
+    {
+        strcpy(str, "<-500000000");
+        return 10;
+    }
+
     if (value < 0)
     {
         *str = '-';
@@ -162,29 +175,53 @@ u16 intToStr(s32 value, char *str, u16 minsize)
 
 u16 uintToStr(u32 value, char *str, u16 minsize)
 {
-    char *dst;
-    u16 length;
-    u32 v;
+    if (value > 500000000)
+    {
+        strcpy(str, ">500000000");
+        return 10;
+    }
 
-    memset(str, '0', minsize);
+    u16 len;
+
+    // need to split in 2 conversions ?
+    if (value > 10000)
+    {
+        const u16 v1 = value / (u16) 10000;
+        const u16 v2 = value % (u16) 10000;
+
+        len = uint16ToStr(v1, str, (minsize > 4)?(minsize - 4):1);
+        len += uint16ToStr(v2, str + len, 4);
+    }
+    else len = uint16ToStr(value, str, minsize);
+
+    return len;
+}
+
+static u16 uint16ToStr(u16 value, char *str, u16 minsize)
+{
+    u16 length;
+    char *dst;
+    u16 v;
 
     length = digits10(value);
     if (length < minsize) length = minsize;
-
     dst = &str[length];
-    *dst = '\0';
+    *dst = 0;
     v = value;
 
     while (v >= 100)
     {
-        const u16 i = (v % 100) * 2;
+        const u16 quot = v / 100;
+        const u16 remain = v % 100;
 
-        v /= 100;
+        const u16 i = remain * 2;
+        v = quot;
+
         *--dst = digits[i + 1];
         *--dst = digits[i + 0];
     }
 
-    // Handle last 1-2 digits
+    // handle last 1-2 digits
     if (v < 10) *--dst = '0' + v;
     else
     {
@@ -194,52 +231,8 @@ u16 uintToStr(u32 value, char *str, u16 minsize)
         *--dst = digits[i + 0];
     }
 
-    return length;
-}
-
-u16 int16ToStr(s16 value, char *str, u16 minsize)
-{
-    if (value < 0)
-    {
-        *str = '-';
-        return uint16ToStr(-value, str + 1, minsize);
-    }
-    else return uint16ToStr(value, str, minsize);
-}
-
-u16 uint16ToStr(u16 value, char *str, u16 minlen)
-{
-    char *dst;
-    u16 length;
-    u16 v;
-
-    memset(str, '0', minlen);
-
-    length = digits10(value);
-    if (length < minlen) length = minlen;
-
-    dst = &str[length];
-    *dst = '\0';
-    v = value;
-
-    while (v >= 100)
-    {
-        const u16 i = (v % 100) * 2;
-
-        v /= 100;
-        *--dst = digits[i + 1];
-        *--dst = digits[i + 0];
-    }
-
-    // Handle last 1-2 digits
-    if (v < 10) *--dst = '0' + v;
-    else
-    {
-        const u16 i = v * 2;
-
-        *--dst = digits[i + 1];
-        *--dst = digits[i + 0];
-    }
+    // pad with '0'
+    while(dst != str) *--dst = '0';
 
     return length;
 }
@@ -289,80 +282,79 @@ void intToHex(u32 value, char *str, u16 minsize)
 
 void fix32ToStr(fix32 value, char *str, u16 numdec)
 {
-    u32 len;
-    fix32 v;
-    u32 frac;
-    char strFrac[8];
+    char *dst = str;
+    fix32 v = value;
 
-    len = 0;
-    if (value < 0)
+    if (v < 0)
     {
-        v = -value;
-        str[len++] = '-';
+        v = -v;
+        *dst++ = '-';
     }
-    else v = value;
 
-    len += uintToStr(fix32ToInt(v), &str[len], 1);
-    str[len++] = '.';
+    dst += uintToStr(fix32ToInt(v), dst, 1);
+    *dst++ = '.';
 
     // get fractional part
-    frac = fix32Frac(v) * 1000;
-    frac /= 1 << FIX32_FRAC_BITS;
+    const u16 frac = (((u16) fix32Frac(v)) * (u16) 1000) / ((u16) 1 << FIX32_FRAC_BITS);
+    u16 len = uint16ToStr(frac, dst, 1);
 
-    // get fractional string
-    uintToStr(frac, strFrac, 3);
-
-    if (numdec >= 3) strcpy(&str[len], strFrac);
-    else strncpy(&str[len], strFrac, numdec);
+    if (len < numdec)
+    {
+        // need to add ending '0'
+        dst += len;
+        while(len++ < numdec) *dst++ = '0';
+        // mark end here
+        *dst = 0;
+    }
+    else dst[numdec] = 0;
 }
 
 void fix16ToStr(fix16 value, char *str, u16 numdec)
 {
-    u32 len;
-    fix16 v;
-    u32 frac;
-    char strFrac[8];
+    char *dst = str;
+    fix16 v = value;
 
-    len = 0;
-    if (value < 0)
+    if (v < 0)
     {
-        v = -value;
-        str[len++] = '-';
+        v = -v;
+        *dst++ = '-';
     }
-    else v = value;
 
-    len += uint16ToStr(fix16ToInt(v), &str[len], 1);
-    str[len++] = '.';
+    dst += uint16ToStr(fix16ToInt(v), dst, 1);
+    *dst++ = '.';
 
     // get fractional part
-    frac = fix16Frac(v) * 1000;
-    frac /= 1 << FIX16_FRAC_BITS;
+    const u16 frac = (((u16) fix16Frac(v)) * (u16) 1000) / ((u16) 1 << FIX16_FRAC_BITS);
+    u16 len = uint16ToStr(frac, dst, 1);
 
-    // get fractional string
-    uint16ToStr(frac, strFrac, 3);
-
-    if (numdec >= 3) strcpy(&str[len], strFrac);
-    else strncpy(&str[len], strFrac, numdec);
-}
-
-
-static u16 digits10(const u32 v)
-{
-    if (v < P01) return 1;
-    if (v < P02) return 2;
-    if (v < P03) return 3;
-    if (v < P08)
+    if (len < numdec)
     {
-        if (v < P06)
-        {
-            if (v < P04) return 4;
-            return 5 + (v >= P05);
-        }
-        return 7 + (v >= P07);
+        // need to add ending '0'
+        dst += len;
+        while(len++ < numdec) *dst++ = '0';
+        // mark end here
+        *dst = 0;
     }
-    return 9 + (v >= P09);
+    else dst[numdec] = 0;
 }
 
+
+static u16 digits10(const u16 v)
+{
+    if (v < P02)
+    {
+        if (v < P01) return 1;
+        return 2;
+    }
+    else
+    {
+        if (v < P03) return 3;
+        if (v < P04) return 4;
+        return 5;
+    }
+}
+
+#if (ENABLE_NEWLIB == 0)
 static u16 skip_atoi(const char **s)
 {
     u16 i = 0;
@@ -373,14 +365,13 @@ static u16 skip_atoi(const char **s)
     return i;
 }
 
-
 static u16 vsprintf(char *buf, const char *fmt, va_list args)
 {
-    char tmp_buffer[12];
-    s16 i;
+    char tmp_buffer[14];
+    s32 i;
     s16 len;
-    s16 *ip;
-    u16 num;
+    s32 *ip;
+    u32 num;
     char *s;
     const char *hexchars;
     char *str;
@@ -401,7 +392,7 @@ static u16 vsprintf(char *buf, const char *fmt, va_list args)
 
         space_sign = zero_pad = plus_sign = left_align = 0;
 
-        // Process the flags
+        // Process the flag
 repeat:
         ++fmt;          // this also skips first '%'
 
@@ -436,7 +427,7 @@ repeat:
         {
             ++fmt;
             // it's the next argument
-            field_width = va_arg(args, s16);
+            field_width = va_arg(args, s32);
 
             if (field_width < 0)
             {
@@ -455,7 +446,7 @@ repeat:
             {
                 ++fmt;
                 // it's the next argument
-                precision = va_arg(args, s16);
+                precision = va_arg(args, s32);
             }
 
             if (precision < 0)
@@ -475,7 +466,7 @@ repeat:
                 while(--field_width > 0)
                     *str++ = ' ';
 
-            *str++ = (unsigned char) va_arg(args, s16);
+            *str++ = (unsigned char) va_arg(args, s32);
 
             while(--field_width > 0)
                 *str++ = ' ';
@@ -522,7 +513,7 @@ repeat:
 hexa_conv:
             s = &tmp_buffer[12];
             *--s = 0;
-            num = va_arg(args, u16);
+            num = va_arg(args, u32);
 
             if (!num)
                 *--s = '0';
@@ -538,14 +529,14 @@ hexa_conv:
             break;
 
         case 'n':
-            ip = va_arg(args, s16*);
+            ip = va_arg(args, s32*);
             *ip = (str - buf);
             continue;
 
         case 'u':
             s = &tmp_buffer[12];
             *--s = 0;
-            num = va_arg(args, u16);
+            num = va_arg(args, u32);
 
             if (!num)
                 *--s = '0';
@@ -564,7 +555,7 @@ hexa_conv:
         case 'i':
             s = &tmp_buffer[12];
             *--s = 0;
-            i = va_arg(args, s16);
+            i = va_arg(args, s32);
 
             if (!i)
                 *--s = '0';
@@ -651,5 +642,4 @@ u16 sprintf(char *buffer, const char *fmt, ...)
 
     return i;
 }
-
-
+#endif // ENABLE_NEWLIB
